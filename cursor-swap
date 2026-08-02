@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cursor-swap: multi-account switcher for cursor-agent CLI (cswap-inspired, for Cursor)
+# cursor-swap: multi-account switcher for cursor-agent CLI
 #
 # Two account types:
 #   session  - a real browser login (email/password/SSO). Swapping overwrites the
@@ -13,8 +13,8 @@
 #              profile is safe to use concurrently in multiple terminals.
 #
 # NOT implemented, on purpose (not just missing):
-#   auto            - cswap picks accounts by remaining 5h/7d quota. Cursor CLI
-#                      exposes no per-account usage %, checked `agent about` and
+#   auto            - auto-switch by remaining quota. Cursor CLI exposes no
+#                      per-account usage %, checked `agent about` and
 #                      `agent status --help` - nothing to compute a strategy from.
 #   tui/watch/menubar - same reason: nothing to visualize without quota data.
 #   swap/move (slot renumbering) - slots are just stable ids assigned at

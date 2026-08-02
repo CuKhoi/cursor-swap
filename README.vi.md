@@ -3,7 +3,8 @@
 [English](README.md) | Tiếng Việt
 
 Tool đổi qua lại nhiều account cho [Cursor CLI](https://cursor.com/cli) (`cursor-agent` /
-`agent`), lấy cảm hứng từ `cswap` (dùng cho Claude Code). Chỉ chạy trên macOS.
+`agent`). Chỉ chạy trên macOS — Linux/Windows dùng cơ chế lưu credential khác, chưa xác minh
+được. [Muốn giúp thêm hỗ trợ?](CONTRIBUTING.md) (file tiếng Anh).
 
 Lưu nhiều account Cursor (login thật hoặc API key), đổi qua lại giữa các account, gán 1
 thư mục project với 1 account để `cursor-swap run` trong thư mục đó luôn dùng đúng account.
@@ -92,8 +93,8 @@ Chạy `cursor-swap --help` để xem đủ danh sách lệnh.
 bỏ, không phải bỏ qua vì lười:
 
 - **Không hiện % usage/quota.** Cursor CLI không expose % rate-limit hay thời gian reset theo
-  account, nên không có kiểu `switch --strategy best` / tự động switch khi gần hết quota như
-  cswap làm cho Claude — không có dữ liệu gì để tính cả.
+  account, nên không có kiểu `switch --strategy best` / tự động switch khi gần hết quota —
+  không có dữ liệu gì để tính cả.
 - **Không có dashboard (tui/watch/menubar).** Cùng lý do: không có dữ liệu quota để vẽ.
 - **Không chạy song song thật sự nhiều session-account.** Đã test `CURSOR_DATA_DIR` xác nhận
   nó không cô lập auth theo process. Cần chạy song song thật thì dùng `add-token` + `run`

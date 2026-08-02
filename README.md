@@ -2,8 +2,9 @@
 
 English | [Tiếng Việt](README.vi.md)
 
-Multi-account switcher for the [Cursor CLI](https://cursor.com/cli) (`cursor-agent` / `agent`), inspired by
-`cswap` for Claude Code. macOS only.
+Multi-account switcher for the [Cursor CLI](https://cursor.com/cli) (`cursor-agent` / `agent`).
+macOS only — Linux/Windows use a different, unverified credential storage mechanism.
+[Help add support](CONTRIBUTING.md).
 
 Save multiple Cursor logins (or API keys), switch between them, map a directory to an
 account so `cursor-swap run` in that folder always uses the right one.
@@ -92,8 +93,8 @@ Checked against the actual Cursor CLI (`agent about`, `agent status --help`) bef
 these were out of scope, not just skipped:
 
 - **No usage/quota display.** Cursor CLI exposes no per-account rate-limit percentage or
-  reset time, so there's no `switch --strategy best` / auto-switch-near-limit like cswap has
-  for Claude — there's nothing to compute it from.
+  reset time, so there's no `switch --strategy best` / auto-switch-near-limit — there's
+  nothing to compute it from.
 - **No dashboard (tui/watch/menubar).** Same reason: no quota data to visualize.
 - **No true concurrent multi-session for browser-login accounts.** Confirmed via testing
   `CURSOR_DATA_DIR` — it does not isolate auth per process. If you need real concurrency,
