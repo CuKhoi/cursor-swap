@@ -1,5 +1,7 @@
 # cursor-swap
 
+English | [Tiếng Việt](README.vi.md)
+
 Multi-account switcher for the [Cursor CLI](https://cursor.com/cli) (`cursor-agent` / `agent`), inspired by
 `cswap` for Claude Code. macOS only.
 
