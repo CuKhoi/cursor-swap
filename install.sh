@@ -13,10 +13,16 @@ command -v jq >/dev/null || {
 }
 command -v agent >/dev/null || echo "warning: cursor-agent CLI ('agent') not found on PATH - install it first: https://cursor.com/cli" >&2
 
+RAW_BASE="https://raw.githubusercontent.com/CuKhoi/cursor-switch/main"
 DEST="${1:-$HOME/.local/bin}"
 mkdir -p "$DEST"
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cp "$SRC_DIR/cursor-swap" "$DEST/cursor-swap"
+
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd || true)"
+if [[ -n "$SRC_DIR" && -f "$SRC_DIR/cursor-swap" ]]; then
+    cp "$SRC_DIR/cursor-swap" "$DEST/cursor-swap"
+else
+    curl -fsSL "$RAW_BASE/cursor-swap" -o "$DEST/cursor-swap"
+fi
 chmod +x "$DEST/cursor-swap"
 
 echo "Installed to $DEST/cursor-swap"

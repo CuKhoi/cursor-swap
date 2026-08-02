@@ -32,9 +32,18 @@ local-storage encryption, so switching CLI accounts does not touch a running IDE
 ## Install
 
 ```
+curl -fsSL https://raw.githubusercontent.com/CuKhoi/cursor-switch/main/install.sh | bash
+```
+
+Installs to `~/.local/bin/cursor-swap`. Pass a different directory as an arg if you don't
+want that: `curl -fsSL .../install.sh | bash -s -- /usr/local/bin`.
+
+Or clone and run it locally:
+
+```
 git clone git@github.com:CuKhoi/cursor-switch.git
 cd cursor-switch
-./install.sh                 # installs to ~/.local/bin
+./install.sh
 ```
 
 Requires `jq` (`brew install jq`) and the [`cursor-agent` CLI](https://cursor.com/cli) already
