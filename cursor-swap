@@ -1,0 +1,467 @@
+#!/usr/bin/env bash
+# cursor-swap: multi-account switcher for cursor-agent CLI (cswap-inspired, for Cursor)
+#
+# Two account types:
+#   session  - a real browser login (email/password/SSO). Swapping overwrites the
+#              CLI's Keychain items (cursor-access-token / cursor-refresh-token,
+#              account cursor-user) + cached authInfo in ~/.cursor/cli-config.json.
+#              This is GLOBAL state: only one session account can be "active" at a
+#              time on this machine, and swapping mid-session in one terminal
+#              affects `agent` in every other terminal too.
+#   api-key  - a Cursor API key (agent --api-key / $CURSOR_API_KEY). Never touches
+#              global state - passed per-invocation, so `run` with an api-key
+#              profile is safe to use concurrently in multiple terminals.
+#
+# NOT implemented, on purpose (not just missing):
+#   auto            - cswap picks accounts by remaining 5h/7d quota. Cursor CLI
+#                      exposes no per-account usage %, checked `agent about` and
+#                      `agent status --help` - nothing to compute a strategy from.
+#   tui/watch/menubar - same reason: nothing to visualize without quota data.
+#   swap/move (slot renumbering) - slots are just stable ids assigned at
+#                      creation; reassigning them adds complexity for no real
+#                      benefit here. Use aliases instead.
+
+set -euo pipefail
+
+STORE="$HOME/.cursor-accounts"
+MAPFILE="$STORE/mappings.json"
+CONFIG="$HOME/.cursor/cli-config.json"
+SVC_ACCESS="cursor-access-token"
+SVC_REFRESH="cursor-refresh-token"
+KC_ACCOUNT="cursor-user"
+
+die() { echo "error: $*" >&2; exit 1; }
+need_jq() { command -v jq >/dev/null || die "jq required"; }
+
+confirm() {
+    [[ "${YES:-0}" == "1" ]] && return 0
+    read -r -p "$1 [y/N] " ans
+    [[ "$ans" =~ ^[Yy]$ ]]
+}
+
+current_email() {
+    [[ -f "$CONFIG" ]] && jq -r '.authInfo.email // "unknown"' "$CONFIG" 2>/dev/null || echo "unknown"
+}
+
+ensure_store() { mkdir -p "$STORE"; chmod 700 "$STORE"; [[ -f "$MAPFILE" ]] || echo '{}' > "$MAPFILE"; }
+
+next_slot() {
+    local max=0 s
+    for m in "$STORE"/*/meta.json; do
+        [[ -f "$m" ]] || continue
+        s=$(jq -r '.slot // 0' "$m")
+        (( s > max )) && max=$s
+    done
+    echo $((max + 1))
+}
+
+# echoes the profile dir for a slot number / name / alias / email, or nothing
+resolve_profile() {
+    local ref="$1" dir name
+    for dir in "$STORE"/*/; do
+        [[ -f "$dir/meta.json" ]] || continue
+        name=$(basename "$dir")
+        if [[ "$name" == "$ref" ]]; then echo "${dir%/}"; return; fi
+        if [[ "$(jq -r '.slot' "$dir/meta.json")" == "$ref" ]]; then echo "${dir%/}"; return; fi
+        if [[ "$(jq -r '.alias // empty' "$dir/meta.json")" == "$ref" ]]; then echo "${dir%/}"; return; fi
+        if [[ "$(jq -r '.email' "$dir/meta.json")" == "$ref" ]]; then echo "${dir%/}"; return; fi
+    done
+}
+
+require_profile() {
+    local ref="$1" dir
+    dir=$(resolve_profile "$ref")
+    [[ -n "$dir" ]] || die "no account matches '$ref' (see: cursor-swap list)"
+    echo "$dir"
+}
+
+label() {
+    local dir="$1" name alias
+    name=$(basename "$dir")
+    alias=$(jq -r '.alias // empty' "$dir/meta.json")
+    [[ -n "$alias" ]] && echo "$name ($alias)" || echo "$name"
+}
+
+# ---- capture a live session account into a profile dir ----
+capture_session() {
+    local name="$1" access refresh email dir alias="${2:-}"
+    access=$(security find-generic-password -s "$SVC_ACCESS" -a "$KC_ACCOUNT" -w 2>/dev/null) || die "no active session (cursor-access-token not in Keychain). Run 'agent login' first."
+    refresh=$(security find-generic-password -s "$SVC_REFRESH" -a "$KC_ACCOUNT" -w 2>/dev/null) || die "no active session (cursor-refresh-token not in Keychain)."
+    [[ -f "$CONFIG" ]] || die "$CONFIG not found"
+    email=$(current_email)
+
+    dir="$STORE/$name"
+    local slot
+    if [[ -d "$dir" ]]; then
+        confirm "Profile '$name' exists ($(jq -r '.email' "$dir/meta.json" 2>/dev/null || echo '?')). Overwrite?" || { echo "aborted"; exit 1; }
+        slot=$(jq -r '.slot' "$dir/meta.json")
+        [[ -z "$alias" ]] && alias=$(jq -r '.alias // empty' "$dir/meta.json")
+    else
+        slot=$(next_slot)
+    fi
+    mkdir -p "$dir"; chmod 700 "$dir"
+    printf '%s' "$access"  > "$dir/access-token";  chmod 600 "$dir/access-token"
+    printf '%s' "$refresh" > "$dir/refresh-token"; chmod 600 "$dir/refresh-token"
+    cp "$CONFIG" "$dir/cli-config.json"
+    jq -n --arg email "$email" --arg ts "$(date -u +%FT%TZ)" --argjson slot "$slot" \
+        --arg alias "$alias" --arg type "session" \
+        '{email:$email, saved_at:$ts, slot:$slot, alias:(if $alias=="" then null else $alias end), type:$type, enabled:true}' \
+        > "$dir/meta.json"
+    echo "Saved '$name' ($email) as slot $slot"
+}
+
+cmd_add() {
+    local name="" alias=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --alias) alias="$2"; shift 2 ;;
+            *) name="$1"; shift ;;
+        esac
+    done
+    [[ -n "$name" ]] || die "usage: cursor-swap add <name> [--alias X]"
+    ensure_store
+    capture_session "$name" "$alias"
+}
+
+cmd_login() {
+    local name="${1:?usage: cursor-swap login <name>}"
+    ensure_store
+    echo "Logging out current session..."
+    agent logout >/dev/null 2>&1 || true
+    echo "Opening browser login for new account..."
+    agent login
+    capture_session "$name"
+}
+
+cmd_add_token() {
+    need_jq; ensure_store
+    local token="${1:?usage: cursor-swap add-token <key|-> [--email E] [--alias A]}"; shift || true
+    local email="" alias=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --email) email="$2"; shift 2 ;;
+            --alias) alias="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    [[ "$token" == "-" ]] && token=$(cat)
+    local slot; slot=$(next_slot)
+    [[ -n "$email" ]] || email="api-key-${slot}@token.local"
+    local dir="$STORE/$email"
+    mkdir -p "$dir"; chmod 700 "$dir"
+    printf '%s' "$token" > "$dir/api-key"; chmod 600 "$dir/api-key"
+    jq -n --arg email "$email" --arg ts "$(date -u +%FT%TZ)" --argjson slot "$slot" \
+        --arg alias "$alias" --arg type "api-key" \
+        '{email:$email, saved_at:$ts, slot:$slot, alias:(if $alias=="" then null else $alias end), type:$type, enabled:true}' \
+        > "$dir/meta.json"
+    echo "Registered API-key profile '$email' as slot $slot"
+}
+
+cmd_use() {
+    need_jq
+    local ref="${1:?usage: cursor-swap switch <slot|name|alias|email>}"
+    local dir; dir=$(require_profile "$ref")
+    local type; type=$(jq -r '.type' "$dir/meta.json")
+    [[ "$type" == "session" ]] || die "$(label "$dir") is an api-key profile - global switch doesn't apply. Use: cursor-swap run $ref -- ..."
+
+    local target_email now_email
+    target_email=$(jq -r '.email' "$dir/meta.json")
+    now_email=$(current_email)
+    if [[ "$now_email" == "$target_email" ]]; then
+        echo "Already on $(label "$dir") ($target_email)"
+        return 0
+    fi
+
+    _restore_session "$dir"
+    echo "Swapped to $(label "$dir"). Verifying:"
+    agent status
+}
+
+_restore_session() {
+    local dir="$1"
+    security add-generic-password -U -s "$SVC_ACCESS"  -a "$KC_ACCOUNT" -w "$(cat "$dir/access-token")"  >/dev/null
+    security add-generic-password -U -s "$SVC_REFRESH" -a "$KC_ACCOUNT" -w "$(cat "$dir/refresh-token")" >/dev/null
+    jq -s '.[0] as $cur | .[1] as $saved | $cur
+        | .authInfo = $saved.authInfo
+        | .autoReviewAvailabilityCache = $saved.autoReviewAvailabilityCache
+        | .serverConfigCache = $saved.serverConfigCache' \
+        "$CONFIG" "$dir/cli-config.json" > "$CONFIG.tmp"
+    mv "$CONFIG.tmp" "$CONFIG"
+}
+
+cmd_switch_next() {
+    need_jq
+    local dirs=() d now_email idx=-1 i=0
+    now_email=$(current_email)
+    while IFS= read -r d; do dirs+=("$d"); done < <(
+        for m in "$STORE"/*/meta.json; do
+            [[ -f "$m" ]] || continue
+            jq -e 'select(.type=="session" and .enabled==true)' "$m" >/dev/null 2>&1 || continue
+            jq -r '.slot' "$m"
+        done | sort -n | while read -r s; do
+            for m in "$STORE"/*/meta.json; do
+                [[ "$(jq -r '.slot' "$m")" == "$s" ]] && dirname "$m"
+            done
+        done
+    )
+    [[ ${#dirs[@]} -gt 0 ]] || die "no session accounts saved (see: cursor-swap add / login)"
+    for i in "${!dirs[@]}"; do
+        [[ "$(jq -r '.email' "${dirs[$i]}/meta.json")" == "$now_email" ]] && idx=$i && break
+    done
+    local next=$(( (idx + 1) % ${#dirs[@]} ))
+    local target="${dirs[$next]}"
+    _restore_session "$target"
+    echo "Swapped to $(label "$target"). Verifying:"
+    agent status
+}
+
+cmd_list() {
+    need_jq; ensure_store
+    local now_email; now_email=$(current_email)
+    local any=0
+    echo "Accounts:"
+    for m in "$STORE"/*/meta.json; do
+        [[ -f "$m" ]] || continue
+        any=1
+        local dir slot email type enabled alias saved_at tag
+        dir=$(dirname "$m")
+        slot=$(jq -r '.slot' "$m"); email=$(jq -r '.email' "$m"); type=$(jq -r '.type' "$m")
+        enabled=$(jq -r '.enabled' "$m"); alias=$(jq -r '.alias // empty' "$m"); saved_at=$(jq -r '.saved_at' "$m")
+        tag=""
+        if [[ "$type" == "session" && "$email" == "$now_email" ]]; then tag=" (active)"; fi
+        [[ "$enabled" == "false" ]] && tag="$tag [disabled]"
+        [[ "$type" == "api-key" ]] && tag="$tag [api-key, use: run]"
+        printf '  %-3s %-28s %s%s\n' "$slot:" "$email" "$([ -n "$alias" ] && echo "\"$alias\" ")" "$tag"
+        printf '      saved: %s\n' "$saved_at"
+    done
+    [[ "$any" == "1" ]] || echo "  (none - use: cursor-swap add <name> / login <name> / add-token <key>)"
+    echo
+    echo "Note: no usage-limit % (5h/7d) - Cursor CLI doesn't expose account quota."
+}
+
+cmd_status() { agent status; agent about; }
+
+cmd_remove() {
+    local ref="${1:?usage: cursor-swap remove <slot|name|alias|email>}"
+    local dir; dir=$(require_profile "$ref")
+    local lbl; lbl=$(label "$dir")
+    confirm "Delete saved profile $lbl?" || { echo "aborted"; exit 1; }
+    rm -rf "$dir"
+    echo "Removed $lbl"
+}
+
+cmd_enable_disable() {
+    need_jq
+    local state="$1" ref="${2:?usage: cursor-swap $1 <slot|name|alias|email>}"
+    local dir; dir=$(require_profile "$ref")
+    jq --argjson v "$state" '.enabled = $v' "$dir/meta.json" > "$dir/meta.json.tmp" && mv "$dir/meta.json.tmp" "$dir/meta.json"
+    echo "$([ "$state" == "true" ] && echo Enabled || echo Disabled) $(label "$dir")"
+}
+
+cmd_alias() {
+    need_jq
+    if [[ $# -eq 0 ]]; then
+        for m in "$STORE"/*/meta.json; do
+            [[ -f "$m" ]] || continue
+            local a; a=$(jq -r '.alias // empty' "$m")
+            [[ -n "$a" ]] && printf '  %-15s -> %s\n' "$a" "$(jq -r '.email' "$m")"
+        done
+        return
+    fi
+    local ref="$1"; local dir; dir=$(require_profile "$ref")
+    if [[ "${2:-}" == "--unset" ]]; then
+        jq '.alias = null' "$dir/meta.json" > "$dir/meta.json.tmp" && mv "$dir/meta.json.tmp" "$dir/meta.json"
+        echo "Unset alias for $(basename "$dir")"
+    else
+        local newalias="${2:?usage: cursor-swap alias <slot|name> <short>}"
+        jq --arg a "$newalias" '.alias = $a' "$dir/meta.json" > "$dir/meta.json.tmp" && mv "$dir/meta.json.tmp" "$dir/meta.json"
+        echo "Alias '$newalias' -> $(basename "$dir")"
+    fi
+}
+
+cmd_map() {
+    need_jq; ensure_store
+    if [[ $# -eq 0 ]]; then
+        jq -r 'to_entries[] | "  \(.value)  ->  \(.key)"' "$MAPFILE"
+        return
+    fi
+    local ref="$1" path="${2:-$PWD}"
+    local dir; dir=$(require_profile "$ref")
+    path=$(cd "$path" && pwd)
+    jq --arg p "$path" --arg n "$(basename "$dir")" '.[$p] = $n' "$MAPFILE" > "$MAPFILE.tmp" && mv "$MAPFILE.tmp" "$MAPFILE"
+    echo "Mapped $path -> $(label "$dir")"
+}
+
+cmd_unmap() {
+    need_jq; ensure_store
+    local path="${1:-$PWD}"; path=$(cd "$path" && pwd)
+    jq --arg p "$path" 'del(.[$p])' "$MAPFILE" > "$MAPFILE.tmp" && mv "$MAPFILE.tmp" "$MAPFILE"
+    echo "Unmapped $path"
+}
+
+mapped_profile_for_cwd() {
+    need_jq; ensure_store
+    local dir="$PWD"
+    while [[ "$dir" != "/" ]]; do
+        local name; name=$(jq -r --arg p "$dir" '.[$p] // empty' "$MAPFILE")
+        [[ -n "$name" ]] && { echo "$name"; return; }
+        dir=$(dirname "$dir")
+    done
+}
+
+cmd_run() {
+    local ref="${1:-}"
+    if [[ -n "$ref" && "$ref" != "--" ]]; then shift; else ref=$(mapped_profile_for_cwd) || true; [[ "${1:-}" == "--" ]] && shift; fi
+    [[ -n "$ref" ]] || die "no account given and no directory mapping for $PWD (see: cursor-swap map)"
+    local dir; dir=$(require_profile "$ref")
+    local type; type=$(jq -r '.type' "$dir/meta.json")
+
+    if [[ "$type" == "api-key" ]]; then
+        exec agent --api-key "$(cat "$dir/api-key")" "$@"
+    fi
+
+    # session type: no real per-terminal isolation exists (Keychain is
+    # OS-user-global; CURSOR_DATA_DIR was tested and does NOT scope auth).
+    # Best effort: swap in, run, swap back to whatever was active before.
+    echo "warning: $(label "$dir") is a session account - 'run' will swap the global CLI session," >&2
+    echo "         execute, then swap back. Other terminals using cursor-agent during this window" >&2
+    echo "         will see the wrong account. Prefer an api-key profile for concurrent use." >&2
+    confirm "Continue?" || { echo "aborted"; exit 1; }
+
+    local prev_email prev_dir
+    prev_email=$(current_email)
+    prev_dir=""
+    for m in "$STORE"/*/meta.json; do
+        [[ -f "$m" ]] || continue
+        [[ "$(jq -r '.email' "$m")" == "$prev_email" ]] && prev_dir=$(dirname "$m") && break
+    done
+
+    _restore_session "$dir"
+    local status=0
+    agent "$@" || status=$?
+
+    if [[ -n "$prev_dir" ]]; then
+        _restore_session "$prev_dir"
+    else
+        echo "note: previous session ($prev_email) wasn't a saved profile - not restored. Run 'cursor-swap add <name>' beforehand next time." >&2
+    fi
+    exit $status
+}
+
+cmd_export() {
+    local path="${1:?usage: cursor-swap export <path.tar.gz>}"
+    ensure_store
+    tar czf "$path" -C "$STORE" .
+    chmod 600 "$path"
+    echo "Exported $(ls "$STORE" | wc -l | tr -d ' ') profile dir(s) to $path"
+    echo "warning: this archive contains plaintext tokens/api keys - handle like a password file."
+}
+
+cmd_import() {
+    local path="${1:?usage: cursor-swap import <path.tar.gz>}"
+    ensure_store
+    [[ -f "$path" ]] || die "$path not found"
+    local tmp; tmp=$(mktemp -d)
+    tar xzf "$path" -C "$tmp"
+    local d name
+    for d in "$tmp"/*/; do
+        [[ -f "$d/meta.json" ]] || continue
+        name=$(basename "$d")
+        if [[ -d "$STORE/$name" && "${FORCE:-0}" != "1" ]]; then
+            echo "skip '$name' (exists, use --force to overwrite)"
+            continue
+        fi
+        rm -rf "$STORE/$name"
+        cp -R "$d" "$STORE/$name"
+        chmod 700 "$STORE/$name"
+        chmod 600 "$STORE/$name"/*token "$STORE/$name"/api-key 2>/dev/null || true
+        echo "imported '$name'"
+    done
+    rm -rf "$tmp"
+}
+
+cmd_purge() {
+    confirm "Delete ALL cursor-swap data in $STORE?" || { echo "aborted"; exit 1; }
+    rm -rf "$STORE"
+    echo "Purged $STORE"
+}
+
+usage() {
+    cat <<EOF
+cursor-swap - multi-account switcher for cursor-agent CLI
+
+Commands:
+  cursor-swap list                    list saved accounts (marks active)
+  cursor-swap status                  show current login + subscription info
+  cursor-swap switch                  rotate to the next enabled session account
+  cursor-swap switch <slot|name|...>  swap the global CLI session to that account
+  cursor-swap add <name> [--alias A]  save the currently logged-in session as <name>
+  cursor-swap login <name>            logout -> browser login -> save as <name>
+  cursor-swap add-token <key|-> [--email E] [--alias A]
+                                       register a Cursor API key (no browser login,
+                                       usable concurrently via 'run')
+  cursor-swap remove <slot|name|...>  delete a saved account       (alias: rm)
+  cursor-swap disable <slot|name|...> hold out of 'switch' rotation
+  cursor-swap enable <slot|name|...>  return to rotation
+  cursor-swap run <slot|name> [-- args...]
+                                       run 'agent' as that account.
+                                       api-key accounts: real per-invocation isolation.
+                                       session accounts: swaps global state, runs, swaps
+                                       back - NOT safe for concurrent terminals.
+  cursor-swap run [-- args...]        run using the account mapped to \$PWD
+  cursor-swap map <slot|name> [path]  map a directory to an account (default: \$PWD)
+  cursor-swap map                     list directory mappings
+  cursor-swap unmap [path]            remove a directory mapping
+  cursor-swap alias <slot|name> <short>
+  cursor-swap alias <slot|name> --unset
+  cursor-swap alias                   list aliases
+  cursor-swap export <path.tar.gz>    back up all accounts (contains secrets)
+  cursor-swap import <path.tar.gz> [--force]
+  cursor-swap purge                   delete all cursor-swap data
+
+Flags:
+  -y, --yes     skip confirmation prompts
+  --force       with 'import': overwrite existing accounts
+
+Not implemented (no equivalent Cursor CLI/API exists):
+  auto (quota-based auto-switch), tui/watch/menubar (dashboards), slot renumbering
+  - Cursor CLI exposes no per-account usage %; checked 'agent about' and
+    'agent status --help'. Use aliases instead of renumbering slots.
+
+Data: $STORE (plaintext tokens/keys, chmod 600 - same trust model as
+cursor-agent's own on-disk config)
+EOF
+}
+
+YES=0; FORCE=0
+args=()
+for a in "$@"; do
+    case "$a" in
+        -y|--yes) YES=1 ;;
+        --force) FORCE=1 ;;
+        *) args+=("$a") ;;
+    esac
+done
+set -- "${args[@]:-}"
+
+case "${1:-}" in
+    add)         shift; cmd_add "$@" ;;
+    login)       shift; cmd_login "$@" ;;
+    add-token)   shift; cmd_add_token "$@" ;;
+    switch)      shift; if [[ $# -eq 0 ]]; then cmd_switch_next; else cmd_use "$@"; fi ;;
+    use)         shift; cmd_use "$@" ;;
+    list|ls)     cmd_list ;;
+    status|current) cmd_status ;;
+    remove|rm)   shift; cmd_remove "$@" ;;
+    disable)     shift; cmd_enable_disable false "$@" ;;
+    enable)      shift; cmd_enable_disable true "$@" ;;
+    run)         shift; cmd_run "$@" ;;
+    map)         shift; cmd_map "$@" ;;
+    unmap)       shift; cmd_unmap "$@" ;;
+    alias)       shift; cmd_alias "$@" ;;
+    export)      shift; cmd_export "$@" ;;
+    import)      shift; cmd_import "$@" ;;
+    purge)       cmd_purge ;;
+    ""|-h|--help|help) usage ;;
+    *) die "unknown command '$1' (see: cursor-swap --help)" ;;
+esac
