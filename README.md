@@ -61,11 +61,12 @@ cursor-swap add personal            # snapshot the currently logged-in session a
 cursor-swap add-token sk-... --email work@co.com --alias work   # API key, no browser login
 
 # list / status
-cursor-swap list                    # shows saved accounts, marks the active one
+cursor-swap list                    # shows saved accounts, marks the active one, shows usage %
 cursor-swap status                  # `agent status` + `agent about`
+cursor-swap usage work              # usage % for one account (default: active)
 
 # switch the global CLI session
-cursor-swap switch work             # by name, slot number, alias, or email
+cursor-swap switch work             # by name, slot number, alias, or email - prints usage % after
 cursor-swap switch                  # rotate to the next enabled session account
 
 # run one command as a given account without touching the global session
@@ -89,15 +90,24 @@ cursor-swap version                 # print the installed version
 
 Run `cursor-swap --help` for the full command list.
 
+## Usage % (undocumented API)
+
+`agent status`/`agent about` expose no per-account quota. But the `cursor-agent` CLI's own
+JS bundle calls a backend RPC — `aiserver.v1.DashboardService/GetCurrentPeriodUsage` — with
+the same Bearer access-token cursor-swap already stores per profile. `list`, `switch`, and
+`usage` call it best-effort and print `total / auto / api` percent used.
+
+This is **not a public/documented Cursor API** — found by reading the CLI's minified JS, not
+from any spec. No stability guarantee; a Cursor update can silently break it, in which case
+these commands just show nothing (they never hard-fail because of it). Usage % for a saved
+but currently-inactive profile depends on that profile's snapshotted access-token still being
+valid — if it's expired, `switch` to that account once to refresh it.
+
 ## What this does NOT do
 
-Checked against the actual Cursor CLI (`agent about`, `agent status --help`) before deciding
-these were out of scope, not just skipped:
-
-- **No usage/quota display.** Cursor CLI exposes no per-account rate-limit percentage or
-  reset time, so there's no `switch --strategy best` / auto-switch-near-limit — there's
-  nothing to compute it from.
-- **No dashboard (tui/watch/menubar).** Same reason: no quota data to visualize.
+- **No auto-switch / tui / watch / menubar.** The usage % above comes from an undocumented
+  endpoint that can change without notice — not something to build unattended automation on.
+  Use `cursor-swap usage` yourself and switch manually.
 - **No true concurrent multi-session for browser-login accounts.** Confirmed via testing
   `CURSOR_DATA_DIR` — it does not isolate auth per process. If you need real concurrency,
   use `add-token` + `run` instead of session accounts.

@@ -61,11 +61,12 @@ cursor-swap add personal            # chụp lại account đang login hiện t�
 cursor-swap add-token sk-... --email work@co.com --alias work   # API key, không cần login browser
 
 # xem list / status
-cursor-swap list                    # hiện các account đã lưu, đánh dấu account đang active
+cursor-swap list                    # hiện các account đã lưu, đánh dấu active, hiện % usage
 cursor-swap status                  # chạy `agent status` + `agent about`
+cursor-swap usage work              # % usage của 1 account (mặc định: account đang active)
 
 # đổi session CLI (toàn cục)
-cursor-swap switch work             # theo tên, số slot, alias, hoặc email
+cursor-swap switch work             # theo tên, số slot, alias, hoặc email - in % usage sau khi đổi
 cursor-swap switch                  # xoay vòng sang account session kế tiếp (còn enable)
 
 # chạy 1 lệnh với account chỉ định, không đụng session toàn cục
@@ -89,15 +90,24 @@ cursor-swap version                 # in ra version đang cài
 
 Chạy `cursor-swap --help` để xem đủ danh sách lệnh.
 
+## % Usage (API không document)
+
+`agent status`/`agent about` không expose quota theo account. Nhưng chính JS bundle của CLI
+`cursor-agent` có gọi 1 RPC backend — `aiserver.v1.DashboardService/GetCurrentPeriodUsage` —
+bằng đúng Bearer access-token mà cursor-swap đã lưu sẵn theo từng profile. `list`, `switch`,
+và `usage` gọi API này kiểu best-effort, in ra % `total / auto / api` đã dùng.
+
+Đây **không phải API public/có document của Cursor** — tìm ra bằng cách đọc JS minified của
+CLI, không phải từ spec chính thức. Không có cam kết ổn định gì cả; Cursor update là có thể
+gãy âm thầm, lúc đó mấy lệnh này chỉ đơn giản không hiện gì (không bao giờ crash vì lý do
+này). % usage của 1 profile đã lưu nhưng đang không active phụ thuộc vào access-token đã chụp
+của profile đó còn hạn hay không — nếu hết hạn, `switch` sang account đó 1 lần để refresh lại.
+
 ## Cái này KHÔNG làm được
 
-Đã kiểm tra thật với Cursor CLI (`agent about`, `agent status --help`) trước khi quyết định
-bỏ, không phải bỏ qua vì lười:
-
-- **Không hiện % usage/quota.** Cursor CLI không expose % rate-limit hay thời gian reset theo
-  account, nên không có kiểu `switch --strategy best` / tự động switch khi gần hết quota —
-  không có dữ liệu gì để tính cả.
-- **Không có dashboard (tui/watch/menubar).** Cùng lý do: không có dữ liệu quota để vẽ.
+- **Không auto-switch / tui / watch / menubar.** % usage ở trên đến từ API không document,
+  có thể đổi bất cứ lúc nào không báo trước — không đáng để xây tự động hóa không giám sát
+  trên đó. Tự chạy `cursor-swap usage` rồi switch tay.
 - **Không chạy song song thật sự nhiều session-account.** Đã test `CURSOR_DATA_DIR` xác nhận
   nó không cô lập auth theo process. Cần chạy song song thật thì dùng `add-token` + `run`
   thay vì account session.

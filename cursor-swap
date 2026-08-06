@@ -12,22 +12,30 @@
 #              global state - passed per-invocation, so `run` with an api-key
 #              profile is safe to use concurrently in multiple terminals.
 #
+# Usage %: `agent status`/`agent about` expose none, but the CLI's own JS bundle
+# calls an undocumented backend RPC (aiserver.v1.DashboardService/GetCurrentPeriodUsage)
+# with the same Bearer access-token cursor-swap already stores per profile. list/switch/
+# usage call it best-effort. UNDOCUMENTED - not a public API, no stability guarantee,
+# can silently break on a Cursor update.
+#
 # NOT implemented, on purpose (not just missing):
-#   auto            - auto-switch by remaining quota. Cursor CLI exposes no
-#                      per-account usage %, checked `agent about` and
-#                      `agent status --help` - nothing to compute a strategy from.
-#   tui/watch/menubar - same reason: nothing to visualize without quota data.
+#   auto              - auto-switch by remaining quota. The usage % above comes from an
+#                        undocumented endpoint; building an automated strategy on top of
+#                        something that can break silently is a step too far. Use
+#                        `cursor-swap usage` yourself and switch manually.
+#   tui/watch/menubar - same reason: not worth building a dashboard on unstable data.
 #   swap/move (slot renumbering) - slots are just stable ids assigned at
 #                      creation; reassigning them adds complexity for no real
 #                      benefit here. Use aliases instead.
 
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 STORE="$HOME/.cursor-accounts"
 MAPFILE="$STORE/mappings.json"
 CONFIG="$HOME/.cursor/cli-config.json"
 RAW_BASE="https://raw.githubusercontent.com/CuKhoi/cursor-switch/main"
+API_BASE="https://api2.cursor.sh"
 SVC_ACCESS="cursor-access-token"
 SVC_REFRESH="cursor-refresh-token"
 KC_ACCOUNT="cursor-user"
@@ -82,6 +90,19 @@ label() {
     name=$(basename "$dir")
     alias=$(jq -r '.alias // empty' "$dir/meta.json")
     [[ -n "$alias" ]] && echo "$name ($alias)" || echo "$name"
+}
+
+# best-effort: prints "  total: N%  auto: N%  api: N%" for a given access token,
+# or nothing + non-zero exit on any failure (expired token, network, API shape changed).
+usage_summary() {
+    local token="$1" resp
+    [[ -n "$token" ]] || return 1
+    resp=$(curl -sS --max-time 4 -X POST "$API_BASE/aiserver.v1.DashboardService/GetCurrentPeriodUsage" \
+        -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+        -H "Connect-Protocol-Version: 1" -d '{}' 2>/dev/null) || return 1
+    jq -e '.planUsage.totalPercentUsed' <<<"$resp" >/dev/null 2>&1 || return 1
+    jq -r 'def r1: (.*10|round)/10;
+        .planUsage | "total: \((.totalPercentUsed // 0)|r1)%  auto: \((.autoPercentUsed // 0)|r1)%  api: \((.apiPercentUsed // 0)|r1)%"' <<<"$resp"
 }
 
 # ---- capture a live session account into a profile dir ----
@@ -177,6 +198,12 @@ cmd_use() {
     _restore_session "$dir"
     echo "Swapped to $(label "$dir"). Verifying:"
     agent status
+    _print_usage_line
+}
+
+_print_usage_line() {
+    local u; u=$(usage_summary "$(security find-generic-password -s "$SVC_ACCESS" -a "$KC_ACCOUNT" -w 2>/dev/null)" 2>/dev/null) || return 0
+    echo "Usage: $u"
 }
 
 _restore_session() {
@@ -215,6 +242,7 @@ cmd_switch_next() {
     _restore_session "$target"
     echo "Swapped to $(label "$target"). Verifying:"
     agent status
+    _print_usage_line
 }
 
 cmd_list() {
@@ -235,13 +263,35 @@ cmd_list() {
         [[ "$type" == "api-key" ]] && tag="$tag [api-key, use: run]"
         printf '  %-3s %-28s %s%s\n' "$slot:" "$email" "$([ -n "$alias" ] && echo "\"$alias\" ")" "$tag"
         printf '      saved: %s\n' "$saved_at"
+        if [[ "$type" == "session" ]]; then
+            local u; u=$(usage_summary "$(cat "$dir/access-token" 2>/dev/null)" 2>/dev/null) || u=""
+            [[ -n "$u" ]] && printf '      usage: %s\n' "$u"
+        fi
     done
     [[ "$any" == "1" ]] || echo "  (none - use: cursor-swap add <name> / login <name> / add-token <key>)"
     echo
-    echo "Note: no usage-limit % (5h/7d) - Cursor CLI doesn't expose account quota."
+    echo "Note: usage % is from an undocumented Cursor API (best-effort, may show nothing"
+    echo "      if a saved token expired - switch to that account to refresh it)."
 }
 
 cmd_status() { agent status; agent about; }
+
+cmd_usage() {
+    need_jq
+    local ref="${1:-}" token label_str
+    if [[ -n "$ref" ]]; then
+        local dir; dir=$(require_profile "$ref")
+        local type; type=$(jq -r '.type' "$dir/meta.json")
+        [[ "$type" == "session" ]] || die "$(label "$dir") is an api-key profile - usage isn't tracked per api-key"
+        token=$(cat "$dir/access-token" 2>/dev/null) || die "no stored access-token for $(label "$dir")"
+        label_str=$(label "$dir")
+    else
+        token=$(security find-generic-password -s "$SVC_ACCESS" -a "$KC_ACCOUNT" -w 2>/dev/null) || die "no active session (see: cursor-swap switch)"
+        label_str="$(current_email) (active)"
+    fi
+    local u; u=$(usage_summary "$token") || die "usage lookup failed - token may be expired, or Cursor's internal API changed (undocumented, no stability guarantee)"
+    echo "$label_str: $u"
+}
 
 cmd_remove() {
     local ref="${1:?usage: cursor-swap remove <slot|name|alias|email>}"
@@ -419,6 +469,8 @@ cursor-swap - multi-account switcher for cursor-agent CLI
 Commands:
   cursor-swap list                    list saved accounts (marks active)
   cursor-swap status                  show current login + subscription info
+  cursor-swap usage [slot|name|...]   show usage % for that account (default: active).
+                                       undocumented Cursor API, best-effort, may be empty
   cursor-swap switch                  rotate to the next enabled session account
   cursor-swap switch <slot|name|...>  swap the global CLI session to that account
   cursor-swap add <name> [--alias A]  save the currently logged-in session as <name>
@@ -451,10 +503,14 @@ Flags:
   -y, --yes     skip confirmation prompts
   --force       with 'import': overwrite existing accounts
 
-Not implemented (no equivalent Cursor CLI/API exists):
-  auto (quota-based auto-switch), tui/watch/menubar (dashboards), slot renumbering
-  - Cursor CLI exposes no per-account usage %; checked 'agent about' and
-    'agent status --help'. Use aliases instead of renumbering slots.
+Usage %: 'list'/'switch'/'usage' call an undocumented Cursor backend API (the same
+one the CLI's own JS bundle uses) with your stored access-token. Not public, no
+stability guarantee - may silently return nothing if Cursor changes it.
+
+Not implemented, on purpose:
+  auto (quota-based auto-switch), tui/watch/menubar (dashboards) - not worth building
+    automation on an undocumented endpoint that can break silently.
+  slot renumbering - slots are stable ids; use aliases instead.
 
 Data: $STORE (plaintext tokens/keys, chmod 600 - same trust model as
 cursor-agent's own on-disk config)
@@ -480,6 +536,7 @@ case "${1:-}" in
     use)         shift; cmd_use "$@" ;;
     list|ls)     cmd_list ;;
     status|current) cmd_status ;;
+    usage)       shift; cmd_usage "$@" ;;
     remove|rm)   shift; cmd_remove "$@" ;;
     disable)     shift; cmd_enable_disable false "$@" ;;
     enable)      shift; cmd_enable_disable true "$@" ;;
