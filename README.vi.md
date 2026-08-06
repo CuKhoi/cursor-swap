@@ -144,6 +144,12 @@ nhiên lỗi thì nhiều khả năng do đây — không có cam kết ổn đ�
   nó không cô lập auth theo process. Cần chạy song song thật thì dùng `add-token` + `run`
   thay vì account session.
 
+## Màu sắc
+
+`list`/`switch`/`usage` dùng bảng màu tối giản (1 accent màu ấm, text phụ màu xám nhạt,
+xanh/vàng/đỏ cho % usage theo mức độ) — tự tắt khi output không phải terminal (bị pipe/redirect),
+tôn trọng [`NO_COLOR`](https://no-color.org/) / `FORCE_COLOR`.
+
 ## Dữ liệu & bảo mật
 
 Profile được lưu ở `~/.cursor-accounts/<tên>/` (dir mode `700`, file token/key mode `600`) —

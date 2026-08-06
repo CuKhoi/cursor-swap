@@ -41,7 +41,7 @@
 
 set -euo pipefail
 
-VERSION="1.5.3"
+VERSION="1.6.0"
 STORE="$HOME/.cursor-accounts"
 MAPFILE="$STORE/mappings.json"
 CONFIG="$HOME/.cursor/cli-config.json"
@@ -52,12 +52,49 @@ SVC_REFRESH="cursor-refresh-token"
 KC_ACCOUNT="cursor-user"
 IDE_DB="$HOME/Library/Application Support/Cursor/User/globalStorage/state.vscdb"
 
-die() { echo "error: $*" >&2; exit 1; }
+# ---- color palette --------------------------------------------------------
+# Single warm accent (xterm-256 173, same terracotta tone claude-swap's CLI
+# printer uses), muted gray for secondary text, bold for structure, a
+# green/amber/red severity ramp for usage %. Off for NO_COLOR, non-tty, or
+# TERM=dumb; on for FORCE_COLOR. Same convention as claude-swap's printer.py.
+_supports_color() {
+    [[ -n "${NO_COLOR:-}" ]] && return 1
+    [[ -n "${FORCE_COLOR:-}" ]] && return 0
+    [[ -t 1 ]] || return 1
+    [[ "${TERM:-}" == "dumb" ]] && return 1
+    return 0
+}
+if _supports_color; then
+    C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
+    C_ACCENT=$'\033[38;5;173m'; C_MUTED=$'\033[38;5;250m'
+    C_RED=$'\033[31m'; C_YELLOW=$'\033[33m'
+    C_OK=$'\033[38;5;108m'; C_WARN=$'\033[38;5;179m'; C_CRIT=$'\033[38;5;167m'
+else
+    C_RESET=""; C_BOLD=""; C_DIM=""
+    C_ACCENT=""; C_MUTED=""
+    C_RED=""; C_YELLOW=""
+    C_OK=""; C_WARN=""; C_CRIT=""
+fi
+_accent() { printf '%s%s%s' "$C_ACCENT" "$1" "$C_RESET"; }
+_muted()  { printf '%s%s%s' "$C_MUTED" "$1" "$C_RESET"; }
+_dimmed() { printf '%s%s%s' "$C_DIM" "$1" "$C_RESET"; }
+_bold_accent() { printf '%s%s%s%s' "$C_BOLD" "$C_ACCENT" "$1" "$C_RESET"; }
+_bold()   { printf '%s%s%s' "$C_BOLD" "$1" "$C_RESET"; }
+# colors a "N" percent value green/amber/red by the same 70/90 thresholds
+# claude-swap's usage bars use, and appends the "%" itself.
+_sev_pct() {
+    local p="$1" color
+    color=$(awk -v p="$p" 'BEGIN{ if (p>=90) print "CRIT"; else if (p>=70) print "WARN"; else print "OK" }')
+    case "$color" in CRIT) color="$C_CRIT" ;; WARN) color="$C_WARN" ;; *) color="$C_OK" ;; esac
+    printf '%s%s%%%s' "$color" "$p" "$C_RESET"
+}
+
+die() { echo "${C_RED}error: $*${C_RESET}" >&2; exit 1; }
 need_jq() { command -v jq >/dev/null || die "jq required"; }
 
 confirm() {
     [[ "${YES:-0}" == "1" ]] && return 0
-    read -r -p "$1 [y/N] " ans
+    read -r -p "${C_YELLOW}$1${C_RESET} [y/N] " ans
     [[ "$ans" =~ ^[Yy]$ ]]
 }
 
@@ -123,7 +160,7 @@ label() {
     local dir="$1" name alias
     name=$(basename "$dir")
     alias=$(jq -r '.alias // empty' "$dir/meta.json")
-    [[ -n "$alias" ]] && echo "$name ($alias)" || echo "$name"
+    [[ -n "$alias" ]] && echo "$(_accent "$name") $(_muted "($alias)")" || _accent "$name"
 }
 
 # any access token this profile has, CLI's or the IDE's - the usage-% API
@@ -171,8 +208,13 @@ usage_summary() {
         -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
         -H "Connect-Protocol-Version: 1" -d '{}' 2>/dev/null) || return 1
     jq -e '.planUsage.totalPercentUsed' <<<"$resp" >/dev/null 2>&1 || return 1
-    jq -r 'def r1: (.*10|round)/10;
-        .planUsage | "total: \((.totalPercentUsed // 0)|r1)%  auto: \((.autoPercentUsed // 0)|r1)%  api: \((.apiPercentUsed // 0)|r1)%"' <<<"$resp"
+    local total auto api
+    read -r total auto api < <(jq -r 'def r1: (.*10|round)/10;
+        .planUsage | "\((.totalPercentUsed // 0)|r1) \((.autoPercentUsed // 0)|r1) \((.apiPercentUsed // 0)|r1)"' <<<"$resp")
+    printf '%s %s  %s %s  %s %s' \
+        "$(_muted total:)" "$(_sev_pct "$total")" \
+        "$(_muted auto:)"  "$(_sev_pct "$auto")" \
+        "$(_muted api:)"   "$(_sev_pct "$api")"
 }
 
 # ---- capture a live session account into a profile dir ----
@@ -522,23 +564,32 @@ cmd_list() {
         enabled=$(jq -r '.enabled' "$m"); alias=$(jq -r '.alias // empty' "$m"); saved_at=$(jq -r '.saved_at' "$m")
         ide_email=$(jq -r '.ide_email // empty' "$m")
         tag=""
-        if [[ "$type" == "session" && "$email" == "$now_email" ]]; then tag=" (cli active)"; fi
-        if [[ -n "$ide_email" && -n "$now_ide_email" && "$ide_email" == "$now_ide_email" ]]; then tag="$tag (ide active)"; fi
-        [[ "$enabled" == "false" ]] && tag="$tag [disabled]"
-        [[ "$type" == "api-key" ]] && tag="$tag [api-key, use: run]"
-        [[ "$type" == "ide-only" ]] && tag="$tag [ide-only, use: ide-switch]"
-        printf '  %-3s %-28s %s%s\n' "$slot:" "$email" "$([ -n "$alias" ] && echo "\"$alias\" ")" "$tag"
-        printf '      saved: %s\n' "$saved_at"
+        if [[ "$type" == "session" && "$email" == "$now_email" ]]; then tag=" $(_bold_accent "(cli active)")"; fi
+        if [[ -n "$ide_email" && -n "$now_ide_email" && "$ide_email" == "$now_ide_email" ]]; then
+            tag="$tag $(_bold_accent "(ide active)")"
+        fi
+        [[ "$enabled" == "false" ]] && tag="$tag $(_muted "[disabled]")"
+        [[ "$type" == "api-key" ]] && tag="$tag $(_muted "[api-key, use: run]")"
+        [[ "$type" == "ide-only" ]] && tag="$tag $(_muted "[ide-only, use: ide-switch]")"
+        # pad plain text to fixed width FIRST, color after - ANSI codes count
+        # toward printf's width and would misalign the columns otherwise.
+        local slot_str email_str
+        printf -v slot_str '%-3s' "$slot:"
+        printf -v email_str '%-28s' "$email"
+        local alias_str=""
+        [[ -n "$alias" ]] && alias_str="$(_muted "\"$alias\" ")"
+        printf '  %s %s %s%s\n' "$(_bold "$slot_str")" "$(_accent "$email_str")" "$alias_str" "$tag"
+        printf '      %s %s\n' "$(_muted saved:)" "$(_muted "$saved_at")"
         if [[ "$type" == "session" || "$type" == "ide-only" ]]; then
             local u; u=$(usage_summary "$(_effective_access_token "$dir")" 2>/dev/null) || u=""
-            [[ -n "$u" ]] && printf '      usage: %s\n' "$u"
+            [[ -n "$u" ]] && printf '      %s %s\n' "$(_muted usage:)" "$u"
         fi
-        [[ -n "$ide_email" && "$type" != "ide-only" ]] && printf '      ide:   %s\n' "$ide_email"
+        [[ -n "$ide_email" && "$type" != "ide-only" ]] && printf '      %s   %s\n' "$(_muted ide:)" "$(_muted "$ide_email")"
     done
     [[ "$any" == "1" ]] || echo "  (none - use: cursor-swap add <name> / login <name> / add-token <key>)"
     echo
-    echo "Note: usage % is from an undocumented Cursor API (best-effort, may show nothing"
-    echo "      if a saved token expired - switch to that account to refresh it)."
+    _muted "Note: usage % is from an undocumented Cursor API (best-effort, may show nothing"; echo
+    _muted "      if a saved token expired - switch to that account to refresh it)."; echo
 }
 
 cmd_status() { agent status; agent about; }
@@ -557,11 +608,11 @@ cmd_usage() {
     else
         token=$(security find-generic-password -s "$SVC_ACCESS" -a "$KC_ACCOUNT" -w 2>/dev/null)
         if [[ -n "$token" ]]; then
-            label_str="$(current_email) (cli active)"
+            label_str="$(_accent "$(current_email)") $(_bold_accent "(cli active)")"
         else
             token=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';" 2>/dev/null)
             [[ -n "$token" ]] || die "no active CLI or IDE session (see: cursor-swap switch)"
-            label_str="$(current_ide_email) (ide active)"
+            label_str="$(_accent "$(current_ide_email)") $(_bold_accent "(ide active)")"
         fi
     fi
     local u; u=$(usage_summary "$token") || die "usage lookup failed - token may be expired, or Cursor's internal API changed (undocumented, no stability guarantee)"

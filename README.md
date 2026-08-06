@@ -146,6 +146,13 @@ why — no stability guarantee.
   `CURSOR_DATA_DIR` — it does not isolate auth per process. If you need real concurrency,
   use `add-token` + `run` instead of session accounts.
 
+## Colors
+
+`list`/`switch`/`usage` use a restrained color scheme (one warm accent, muted secondary
+text, green/amber/red for usage % by severity) — off automatically when output isn't a
+terminal (piped/redirected), and respects [`NO_COLOR`](https://no-color.org/) /
+`FORCE_COLOR`.
+
 ## Data & security
 
 Profiles are stored in `~/.cursor-accounts/<name>/` (dir mode `700`, token/key files mode
