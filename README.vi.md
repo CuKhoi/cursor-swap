@@ -64,7 +64,7 @@ cursor-swap list                    # hiện các account đã lưu, đánh dấ
 cursor-swap status                  # chạy `agent status` + `agent about`
 cursor-swap usage work              # % usage của 1 account (mặc định: account đang active)
 
-# đổi session CLI (toàn cục)
+# đổi session CLI toàn cục (và cả session IDE, nếu profile này đã chạy ide-add)
 cursor-swap switch work             # theo tên, số slot, alias, hoặc email - in % usage sau khi đổi
 cursor-swap switch                  # xoay vòng sang account session kế tiếp (còn enable)
 
@@ -79,7 +79,8 @@ cursor-swap run                     # tự chọn "work" theo mapping thư mục
 
 # account IDE Cursor.app (login riêng, tách khỏi CLI - xem phần "Account IDE" bên dưới)
 cursor-swap ide-add work            # chụp lại session IDE đang login hiện tại, lưu thành "work"
-cursor-swap ide-switch work         # đổi session IDE - tự tắt + mở lại Cursor.app
+                                     # (sau lệnh này, 'switch work' bên trên đổi luôn cả 2)
+cursor-swap ide-switch work         # CHỈ đổi session IDE, không đụng CLI
 
 # việc vặt khác
 cursor-swap alias 1 work            # đặt tên tắt cho 1 slot
@@ -118,10 +119,15 @@ khác, không liên quan gì đến login của IDE.
 
 - `cursor-swap ide-add <name>` chụp lại session IDE đang login (chạy được dù Cursor.app đang
   mở hay đã tắt).
-- `cursor-swap ide-switch <ref>` phục hồi lại 1 session. App **phải tắt hẳn** trước — nó chỉ
-  đọc auth từ disk lúc khởi động, và process đang sống có thể ghi đè lại thứ mình vừa ghi.
-  `ide-switch` tự tắt app cho bạn (hỏi xác nhận trước — việc này đóng hết mọi window IDE đang
-  mở) rồi mở lại sau khi xong.
+- `cursor-swap ide-switch <ref>` **chỉ** phục hồi session IDE, không đụng CLI.
+- Sau khi 1 profile đã có session IDE được chụp, `cursor-swap switch <ref>` bình thường sẽ đổi
+  **cả 2** — CLI trước, IDE sau — trong 1 lệnh. Profile nào chưa từng chạy `ide-add` thì
+  `switch` vẫn y như cũ (chỉ CLI, không hỏi gì về IDE).
+
+Dù chạy qua đường nào, đổi session IDE cũng cần app **tắt hẳn** trước — nó chỉ đọc auth từ
+disk lúc khởi động, và process đang sống có thể ghi đè lại thứ mình vừa ghi. cursor-swap tự
+tắt app cho bạn (hỏi xác nhận trước — việc này đóng hết mọi window IDE đang mở) rồi mở lại
+sau khi xong.
 
 Cùng lưu ý như % usage: **định dạng lưu trên disk không document**, tìm ra bằng cách soi file,
 không phải từ spec chính thức. Cursor update là có thể đổi; nếu `ide-add`/`ide-switch` tự

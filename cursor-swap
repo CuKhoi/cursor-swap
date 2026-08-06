@@ -41,7 +41,7 @@
 
 set -euo pipefail
 
-VERSION="1.3.0"
+VERSION="1.4.0"
 STORE="$HOME/.cursor-accounts"
 MAPFILE="$STORE/mappings.json"
 CONFIG="$HOME/.cursor/cli-config.json"
@@ -259,11 +259,10 @@ _restore_ide_session() {
     done
 }
 
-cmd_ide_switch() {
-    need_jq
-    local ref="${1:?usage: cursor-swap ide-switch <slot|name|alias|email>}"
-    local dir; dir=$(require_profile "$ref")
-    [[ -f "$dir/ide-auth.json" ]] || die "$(label "$dir") has no captured IDE session (see: cursor-swap ide-add $ref)"
+# does the actual quit -> write -> relaunch dance for a profile's IDE session.
+# caller must have already confirmed $dir/ide-auth.json exists.
+_do_ide_switch() {
+    local dir="$1"
     [[ -f "$IDE_DB" ]] || die "$IDE_DB not found"
 
     local was_running=0
@@ -287,15 +286,35 @@ cmd_ide_switch() {
     fi
 }
 
+# switches the IDE session too, but only if this profile ever captured one
+# (cursor-swap ide-add) - silent no-op otherwise, so plain CLI-only users see
+# no difference.
+_maybe_switch_ide() {
+    local dir="$1"
+    [[ -f "$dir/ide-auth.json" ]] || return 0
+    _do_ide_switch "$dir"
+}
+
+cmd_ide_switch() {
+    need_jq
+    local ref="${1:?usage: cursor-swap ide-switch <slot|name|alias|email>}"
+    local dir; dir=$(require_profile "$ref")
+    [[ -f "$dir/ide-auth.json" ]] || die "$(label "$dir") has no captured IDE session (see: cursor-swap ide-add $ref)"
+    _do_ide_switch "$dir"
+}
+
 cmd_use() {
     need_jq
     local ref="${1:?usage: cursor-swap switch <slot|name|alias|email>}"
     local dir; dir=$(require_profile "$ref")
     local type; type=$(jq -r '.type' "$dir/meta.json")
     case "$type" in
-        session) ;;
         api-key) die "$(label "$dir") is an api-key profile - global switch doesn't apply. Use: cursor-swap run $ref -- ..." ;;
-        ide-only) die "$(label "$dir") only has an IDE session captured, no CLI session. Use: cursor-swap ide-switch $ref" ;;
+        ide-only)
+            echo "$(label "$dir") has no CLI session captured - switching the IDE session only."
+            _maybe_switch_ide "$dir"
+            return 0
+            ;;
     esac
 
     local target_email now_email
@@ -303,13 +322,13 @@ cmd_use() {
     now_email=$(current_email)
     if [[ "$now_email" == "$target_email" ]]; then
         echo "Already on $(label "$dir") ($target_email)"
-        return 0
+    else
+        _restore_session "$dir"
+        echo "Swapped to $(label "$dir"). Verifying:"
+        agent status
+        _print_usage_line
     fi
-
-    _restore_session "$dir"
-    echo "Swapped to $(label "$dir"). Verifying:"
-    agent status
-    _print_usage_line
+    _maybe_switch_ide "$dir"
 }
 
 _print_usage_line() {
@@ -354,6 +373,7 @@ cmd_switch_next() {
     echo "Swapped to $(label "$target"). Verifying:"
     agent status
     _print_usage_line
+    _maybe_switch_ide "$target"
 }
 
 cmd_list() {
@@ -590,7 +610,10 @@ Commands:
   cursor-swap usage [slot|name|...]   show usage % for that account (default: active).
                                        undocumented Cursor API, best-effort, may be empty
   cursor-swap switch                  rotate to the next enabled session account
-  cursor-swap switch <slot|name|...>  swap the global CLI session to that account
+  cursor-swap switch <slot|name|...>  swap the global CLI session to that account.
+                                       also swaps the Cursor.app IDE session if this
+                                       profile ever had 'ide-add' run on it (quits +
+                                       relaunches the app, confirms first)
   cursor-swap add <name> [--alias A]  save the currently logged-in session as <name>
   cursor-swap login <name>            logout -> browser login -> save as <name>
   cursor-swap add-token <key|-> [--email E] [--alias A]

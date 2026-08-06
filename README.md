@@ -65,7 +65,7 @@ cursor-swap list                    # shows saved accounts, marks the active one
 cursor-swap status                  # `agent status` + `agent about`
 cursor-swap usage work              # usage % for one account (default: active)
 
-# switch the global CLI session
+# switch the global CLI session (and the IDE session too, if you ran ide-add for it)
 cursor-swap switch work             # by name, slot number, alias, or email - prints usage % after
 cursor-swap switch                  # rotate to the next enabled session account
 
@@ -80,7 +80,8 @@ cursor-swap run                     # auto-picks "work" from the directory mappi
 
 # Cursor.app IDE account (separate login from the CLI - see "IDE account" below)
 cursor-swap ide-add work            # snapshot the currently logged-in IDE session as "work"
-cursor-swap ide-switch work         # swap the IDE session - quits + relaunches Cursor.app
+                                     # (after this, plain 'switch work' above swaps both)
+cursor-swap ide-switch work         # swap ONLY the IDE session, leave the CLI alone
 
 # housekeeping
 cursor-swap alias 1 work            # short name for a slot
@@ -119,10 +120,15 @@ things and isn't involved in the IDE's login at all.
 
 - `cursor-swap ide-add <name>` snapshots the currently-logged-in IDE session into a profile
   (works whether or not Cursor.app is running).
-- `cursor-swap ide-switch <ref>` restores one. The app **must be fully quit** first — it only
-  reads auth off disk at startup, and a live process can overwrite the write anyway.
-  `ide-switch` quits it for you (asks to confirm — this closes every open IDE window) and
-  relaunches it after.
+- `cursor-swap ide-switch <ref>` restores **only** the IDE session, leaving the CLI alone.
+- Once a profile has an IDE session captured, plain `cursor-swap switch <ref>` swaps **both**
+  — the CLI session, then the IDE one — in a single command. If a profile never had `ide-add`
+  run on it, `switch` behaves exactly as before (CLI only, no IDE prompt).
+
+Either way, swapping the IDE session requires the app **fully quit** first — it only reads
+auth off disk at startup, and a live process can overwrite the write anyway. cursor-swap
+quits it for you (asks to confirm — this closes every open IDE window) and relaunches it
+after.
 
 Same caveat as usage %: **undocumented on-disk format**, found by inspection, not from a
 spec. A Cursor update can change it; if `ide-add`/`ide-switch` starts failing, that's likely
