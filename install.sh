@@ -14,7 +14,7 @@ command -v jq >/dev/null || {
 }
 command -v agent >/dev/null || echo "warning: cursor-agent CLI ('agent') not found on PATH - install it first: https://cursor.com/cli" >&2
 
-RAW_BASE="https://raw.githubusercontent.com/CuKhoi/cursor-switch/main"
+RAW_BASE="https://raw.githubusercontent.com/CuKhoi/cursor-swap/main"
 DEST="${1:-$HOME/.local/bin}"
 mkdir -p "$DEST"
 

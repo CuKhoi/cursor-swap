@@ -39,7 +39,7 @@ the CLI session (Keychain-based), `ide-add`/`ide-switch` for the Cursor.app IDE 
 ## Install
 
 ```
-curl -fsSL https://raw.githubusercontent.com/CuKhoi/cursor-switch/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/CuKhoi/cursor-swap/main/install.sh | bash
 ```
 
 Installs to `~/.local/bin/cursorswap`. Pass a different directory as an arg if you don't
@@ -48,8 +48,8 @@ want that: `curl -fsSL .../install.sh | bash -s -- /usr/local/bin`.
 Or clone and run it locally:
 
 ```
-git clone git@github.com:CuKhoi/cursor-switch.git
-cd cursor-switch
+git clone git@github.com:CuKhoi/cursor-swap.git
+cd cursor-swap
 ./install.sh
 ```
 

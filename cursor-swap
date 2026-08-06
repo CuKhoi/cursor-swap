@@ -12,7 +12,7 @@
 # (the actual account data) - that's untouched by anything in this file.
 set -euo pipefail
 
-RAW_BASE="https://raw.githubusercontent.com/CuKhoi/cursor-switch/main"
+RAW_BASE="https://raw.githubusercontent.com/CuKhoi/cursor-swap/main"
 
 self="$0"
 case "$self" in

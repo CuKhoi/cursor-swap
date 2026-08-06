@@ -39,7 +39,7 @@ Keychain), `ide-add`/`ide-switch` cho session IDE Cursor.app (dựa sqlite, xem 
 ## Cài đặt
 
 ```
-curl -fsSL https://raw.githubusercontent.com/CuKhoi/cursor-switch/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/CuKhoi/cursor-swap/main/install.sh | bash
 ```
 
 Cài vào `~/.local/bin/cursorswap`. Muốn cài chỗ khác thì truyền thêm arg:
@@ -48,8 +48,8 @@ Cài vào `~/.local/bin/cursorswap`. Muốn cài chỗ khác thì truyền thêm
 Hoặc clone về chạy local:
 
 ```
-git clone git@github.com:CuKhoi/cursor-switch.git
-cd cursor-switch
+git clone git@github.com:CuKhoi/cursor-swap.git
+cd cursor-swap
 ./install.sh
 ```
 
