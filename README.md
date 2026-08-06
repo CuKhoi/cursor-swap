@@ -16,10 +16,10 @@ Keychain (`cursor-access-token` / `cursor-refresh-token`, account `cursor-user`)
 per-project config file. `cursor-swap` snapshots those Keychain items (plus the cached
 `authInfo` in `~/.cursor/cli-config.json`) per named profile, and restores them on switch.
 
-**This is different from Cursor's IDE account.** The Keychain items above belong to the CLI
-only — the Cursor.app desktop editor uses a separate item (`Cursor Safe Storage`) for its own
-local-storage encryption, so switching CLI accounts does not touch a running IDE session.
-(Verified by inspecting Keychain item metadata; not touched or read by this tool.)
+**Cursor.app's own login is a separate account from the CLI's** — switching one does not
+touch the other. cursor-swap manages both, independently: `add`/`login`/`switch`/`run` for
+the CLI session (Keychain-based), `ide-add`/`ide-switch` for the Cursor.app IDE session
+(sqlite-based, see below).
 
 ## Two account types
 
@@ -78,6 +78,10 @@ cd ~/code/some-project
 cursor-swap map work
 cursor-swap run                     # auto-picks "work" from the directory mapping
 
+# Cursor.app IDE account (separate login from the CLI - see "IDE account" below)
+cursor-swap ide-add work            # snapshot the currently logged-in IDE session as "work"
+cursor-swap ide-switch work         # swap the IDE session - quits + relaunches Cursor.app
+
 # housekeeping
 cursor-swap alias 1 work            # short name for a slot
 cursor-swap disable work            # skip in rotation
@@ -103,6 +107,27 @@ these commands just show nothing (they never hard-fail because of it). Usage % f
 but currently-inactive profile depends on that profile's snapshotted access-token still being
 valid — if it's expired, `switch` to that account once to refresh it.
 
+## IDE account (undocumented storage)
+
+Cursor.app (the desktop editor) is a **separate login from the CLI** — it can be signed into
+a different account entirely. Its session isn't in the Keychain at all; it's two plaintext
+rows — `cursorAuth/accessToken` / `cursorAuth/refreshToken` — in the app's own local sqlite
+db (`~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`, `ItemTable`).
+Found by reading that file (with the app quit, so its WAL journal was checkpointed) — not
+the `Cursor Safe Storage` Keychain item, which is Electron's own encryption key for unrelated
+things and isn't involved in the IDE's login at all.
+
+- `cursor-swap ide-add <name>` snapshots the currently-logged-in IDE session into a profile
+  (works whether or not Cursor.app is running).
+- `cursor-swap ide-switch <ref>` restores one. The app **must be fully quit** first — it only
+  reads auth off disk at startup, and a live process can overwrite the write anyway.
+  `ide-switch` quits it for you (asks to confirm — this closes every open IDE window) and
+  relaunches it after.
+
+Same caveat as usage %: **undocumented on-disk format**, found by inspection, not from a
+spec. A Cursor update can change it; if `ide-add`/`ide-switch` starts failing, that's likely
+why — no stability guarantee.
+
 ## What this does NOT do
 
 - **No auto-switch / tui / watch / menubar.** The usage % above comes from an undocumented
@@ -116,9 +141,10 @@ valid — if it's expired, `switch` to that account once to refresh it.
 
 Profiles are stored in `~/.cursor-accounts/<name>/` (dir mode `700`, token/key files mode
 `600`) — plaintext on disk, same trust model as `cursor-agent`'s own `~/.cursor/cli-config.json`
-and as `security find-generic-password` output. Anyone with read access to your user account
-can already read the live Keychain item; this tool doesn't lower that bar, but treat the
-store (and any `export` archive) like a password file.
+and as `security find-generic-password` output. `ide-auth.json` (from `ide-add`) is plaintext
+too, same trust model as Cursor.app's own `state.vscdb`, which already stores the same tokens
+unencrypted. Anyone with read access to your user account can already read these; this tool
+doesn't lower that bar, but treat the store (and any `export` archive) like a password file.
 
 ## License
 

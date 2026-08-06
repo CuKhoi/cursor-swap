@@ -12,6 +12,17 @@
 #              global state - passed per-invocation, so `run` with an api-key
 #              profile is safe to use concurrently in multiple terminals.
 #
+# IDE account (ide-add/ide-switch): Cursor.app (the desktop editor) is a SEPARATE
+# login from the CLI - can be on a different account entirely. Its session lives as
+# plaintext cursorAuth/accessToken + cursorAuth/refreshToken rows in the app's own
+# sqlite db (User/globalStorage/state.vscdb, ItemTable), found by reading that file
+# after quitting the app (WAL wasn't checkpointed while it ran) - not the "Cursor
+# Safe Storage" Keychain item, which is Electron's own encryption key for unrelated
+# things. UNDOCUMENTED on-disk format - can change on a Cursor update. Swapping
+# requires the app fully quit first (live process can overwrite the write, and it
+# only reads auth off disk at startup) - ide-switch quits it for you (with confirm)
+# and relaunches after.
+#
 # Usage %: `agent status`/`agent about` expose none, but the CLI's own JS bundle
 # calls an undocumented backend RPC (aiserver.v1.DashboardService/GetCurrentPeriodUsage)
 # with the same Bearer access-token cursor-swap already stores per profile. list/switch/
@@ -30,7 +41,7 @@
 
 set -euo pipefail
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 STORE="$HOME/.cursor-accounts"
 MAPFILE="$STORE/mappings.json"
 CONFIG="$HOME/.cursor/cli-config.json"
@@ -39,6 +50,7 @@ API_BASE="https://api2.cursor.sh"
 SVC_ACCESS="cursor-access-token"
 SVC_REFRESH="cursor-refresh-token"
 KC_ACCOUNT="cursor-user"
+IDE_DB="$HOME/Library/Application Support/Cursor/User/globalStorage/state.vscdb"
 
 die() { echo "error: $*" >&2; exit 1; }
 need_jq() { command -v jq >/dev/null || die "jq required"; }
@@ -51,6 +63,11 @@ confirm() {
 
 current_email() {
     [[ -f "$CONFIG" ]] && jq -r '.authInfo.email // "unknown"' "$CONFIG" 2>/dev/null || echo "unknown"
+}
+
+current_ide_email() {
+    [[ -f "$IDE_DB" ]] || return
+    sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/cachedEmail';" 2>/dev/null
 }
 
 ensure_store() { mkdir -p "$STORE"; chmod 700 "$STORE"; [[ -f "$MAPFILE" ]] || echo '{}' > "$MAPFILE"; }
@@ -180,12 +197,106 @@ cmd_add_token() {
     echo "Registered API-key profile '$email' as slot $slot"
 }
 
+_ide_running() { pgrep -x Cursor >/dev/null 2>&1; }
+
+# jq program that turns [{key,value},...] rows into REPLACE-on-conflict INSERT
+# statements (ItemTable.key is UNIQUE ON CONFLICT REPLACE, so a plain INSERT
+# acts as an upsert). Built via a quoted heredoc so the SQL quote-escaping
+# (' -> '') needs no bash-level escaping of its own.
+IFS= read -r -d '' _IDE_ROWS_TO_SQL <<'JQEOF' || true
+def esc: gsub("'"; "''");
+.[] | "INSERT INTO ItemTable(key,value) VALUES('" + (.key|esc) + "', '" + ((.value|tostring)|esc) + "');"
+JQEOF
+
+cmd_ide_add() {
+    need_jq; ensure_store
+    local name="" alias=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --alias) alias="$2"; shift 2 ;;
+            *) name="$1"; shift ;;
+        esac
+    done
+    [[ -n "$name" ]] || die "usage: cursor-swap ide-add <name> [--alias X]"
+    [[ -f "$IDE_DB" ]] || die "$IDE_DB not found - is Cursor.app installed?"
+
+    local rows; rows=$(sqlite3 -json "$IDE_DB" "SELECT key, value FROM ItemTable WHERE key LIKE 'cursorAuth/%';" 2>/dev/null)
+    [[ -n "$rows" && "$rows" != "[]" ]] || die "no cursorAuth/* rows in Cursor.app's local db - log into the IDE first"
+    local ide_email; ide_email=$(jq -r '.[] | select(.key=="cursorAuth/cachedEmail") | .value' <<<"$rows")
+    [[ -n "$ide_email" ]] || die "couldn't find a cached email for the current IDE session"
+
+    local dir="$STORE/$name" slot
+    if [[ -d "$dir" ]]; then
+        slot=$(jq -r '.slot' "$dir/meta.json")
+        [[ -z "$alias" ]] && alias=$(jq -r '.alias // empty' "$dir/meta.json")
+    else
+        slot=$(next_slot)
+    fi
+    mkdir -p "$dir"; chmod 700 "$dir"
+    echo "$rows" > "$dir/ide-auth.json"; chmod 600 "$dir/ide-auth.json"
+
+    if [[ -f "$dir/meta.json" ]]; then
+        jq --arg e "$ide_email" '.ide_email = $e' "$dir/meta.json" > "$dir/meta.json.tmp" && mv "$dir/meta.json.tmp" "$dir/meta.json"
+    else
+        jq -n --arg email "$ide_email" --arg ts "$(date -u +%FT%TZ)" --argjson slot "$slot" \
+            --arg alias "$alias" \
+            '{email:$email, ide_email:$email, saved_at:$ts, slot:$slot, alias:(if $alias=="" then null else $alias end), type:"ide-only", enabled:true}' \
+            > "$dir/meta.json"
+    fi
+    echo "Saved IDE session '$name' ($ide_email) as slot $slot"
+}
+
+_restore_ide_session() {
+    local dir="$1"
+    [[ -f "$dir/ide-auth.json" ]] || die "$(label "$dir") has no captured IDE session (see: cursor-swap ide-add)"
+    local sql; sql=$(jq -r "$_IDE_ROWS_TO_SQL" "$dir/ide-auth.json")
+    # right after Cursor.app exits, a helper process can briefly still hold the
+    # sqlite file lock - retry a couple times before giving up.
+    local tries=0
+    until sqlite3 "$IDE_DB" "$sql" 2>/dev/null; do
+        (( tries++ >= 4 )) && die "couldn't write to $IDE_DB (still locked, or db format changed - undocumented, no stability guarantee)"
+        sleep 1
+    done
+}
+
+cmd_ide_switch() {
+    need_jq
+    local ref="${1:?usage: cursor-swap ide-switch <slot|name|alias|email>}"
+    local dir; dir=$(require_profile "$ref")
+    [[ -f "$dir/ide-auth.json" ]] || die "$(label "$dir") has no captured IDE session (see: cursor-swap ide-add $ref)"
+    [[ -f "$IDE_DB" ]] || die "$IDE_DB not found"
+
+    local was_running=0
+    if _ide_running; then
+        was_running=1
+        confirm "Cursor.app is running and must be fully quit to swap its session safely (all windows will close, then reopen). Continue?" \
+            || { echo "aborted"; exit 1; }
+        osascript -e 'quit app "Cursor"' >/dev/null 2>&1 || true
+        local waited=0
+        while _ide_running && (( waited < 15 )); do sleep 1; waited=$((waited + 1)); done
+        _ide_running && die "Cursor.app didn't quit in time - close it manually and retry"
+    fi
+
+    _restore_ide_session "$dir"
+    echo "Swapped IDE session to $(label "$dir")."
+    if [[ "$was_running" == "1" ]]; then
+        open -a "Cursor"
+        echo "Relaunched Cursor.app."
+    else
+        echo "Cursor.app wasn't running - it'll pick this up next time it starts."
+    fi
+}
+
 cmd_use() {
     need_jq
     local ref="${1:?usage: cursor-swap switch <slot|name|alias|email>}"
     local dir; dir=$(require_profile "$ref")
     local type; type=$(jq -r '.type' "$dir/meta.json")
-    [[ "$type" == "session" ]] || die "$(label "$dir") is an api-key profile - global switch doesn't apply. Use: cursor-swap run $ref -- ..."
+    case "$type" in
+        session) ;;
+        api-key) die "$(label "$dir") is an api-key profile - global switch doesn't apply. Use: cursor-swap run $ref -- ..." ;;
+        ide-only) die "$(label "$dir") only has an IDE session captured, no CLI session. Use: cursor-swap ide-switch $ref" ;;
+    esac
 
     local target_email now_email
     target_email=$(jq -r '.email' "$dir/meta.json")
@@ -247,26 +358,32 @@ cmd_switch_next() {
 
 cmd_list() {
     need_jq; ensure_store
-    local now_email; now_email=$(current_email)
+    local now_email now_ide_email
+    now_email=$(current_email)
+    now_ide_email=$(current_ide_email)
     local any=0
     echo "Accounts:"
     for m in "$STORE"/*/meta.json; do
         [[ -f "$m" ]] || continue
         any=1
-        local dir slot email type enabled alias saved_at tag
+        local dir slot email type enabled alias saved_at tag ide_email
         dir=$(dirname "$m")
         slot=$(jq -r '.slot' "$m"); email=$(jq -r '.email' "$m"); type=$(jq -r '.type' "$m")
         enabled=$(jq -r '.enabled' "$m"); alias=$(jq -r '.alias // empty' "$m"); saved_at=$(jq -r '.saved_at' "$m")
+        ide_email=$(jq -r '.ide_email // empty' "$m")
         tag=""
-        if [[ "$type" == "session" && "$email" == "$now_email" ]]; then tag=" (active)"; fi
+        if [[ "$type" == "session" && "$email" == "$now_email" ]]; then tag=" (cli active)"; fi
+        if [[ -n "$ide_email" && -n "$now_ide_email" && "$ide_email" == "$now_ide_email" ]]; then tag="$tag (ide active)"; fi
         [[ "$enabled" == "false" ]] && tag="$tag [disabled]"
         [[ "$type" == "api-key" ]] && tag="$tag [api-key, use: run]"
+        [[ "$type" == "ide-only" ]] && tag="$tag [ide-only, use: ide-switch]"
         printf '  %-3s %-28s %s%s\n' "$slot:" "$email" "$([ -n "$alias" ] && echo "\"$alias\" ")" "$tag"
         printf '      saved: %s\n' "$saved_at"
         if [[ "$type" == "session" ]]; then
             local u; u=$(usage_summary "$(cat "$dir/access-token" 2>/dev/null)" 2>/dev/null) || u=""
             [[ -n "$u" ]] && printf '      usage: %s\n' "$u"
         fi
+        [[ -n "$ide_email" && "$type" != "ide-only" ]] && printf '      ide:   %s\n' "$ide_email"
     done
     [[ "$any" == "1" ]] || echo "  (none - use: cursor-swap add <name> / login <name> / add-token <key>)"
     echo
@@ -282,7 +399,7 @@ cmd_usage() {
     if [[ -n "$ref" ]]; then
         local dir; dir=$(require_profile "$ref")
         local type; type=$(jq -r '.type' "$dir/meta.json")
-        [[ "$type" == "session" ]] || die "$(label "$dir") is an api-key profile - usage isn't tracked per api-key"
+        [[ "$type" == "session" ]] || die "$(label "$dir") has no CLI session captured (type: $type) - usage % needs one"
         token=$(cat "$dir/access-token" 2>/dev/null) || die "no stored access-token for $(label "$dir")"
         label_str=$(label "$dir")
     else
@@ -371,6 +488,7 @@ cmd_run() {
     if [[ "$type" == "api-key" ]]; then
         exec agent --api-key "$(cat "$dir/api-key")" "$@"
     fi
+    [[ "$type" == "session" ]] || die "$(label "$dir") only has an IDE session captured, no CLI session to run with."
 
     # session type: no real per-terminal isolation exists (Keychain is
     # OS-user-global; CURSOR_DATA_DIR was tested and does NOT scope auth).
@@ -478,6 +596,13 @@ Commands:
   cursor-swap add-token <key|-> [--email E] [--alias A]
                                        register a Cursor API key (no browser login,
                                        usable concurrently via 'run')
+  cursor-swap ide-add <name> [--alias A]
+                                       snapshot the CURRENTLY logged-in Cursor.app IDE
+                                       session (separate login from the CLI) as <name>
+  cursor-swap ide-switch <slot|name|...>
+                                       swap the Cursor.app IDE session to that account.
+                                       quits + relaunches the app (confirms first,
+                                       closes ALL open IDE windows during the swap)
   cursor-swap remove <slot|name|...>  delete a saved account       (alias: rm)
   cursor-swap disable <slot|name|...> hold out of 'switch' rotation
   cursor-swap enable <slot|name|...>  return to rotation
@@ -507,6 +632,11 @@ Usage %: 'list'/'switch'/'usage' call an undocumented Cursor backend API (the sa
 one the CLI's own JS bundle uses) with your stored access-token. Not public, no
 stability guarantee - may silently return nothing if Cursor changes it.
 
+IDE account: Cursor.app (the desktop editor) has its OWN separate login from the
+CLI - can be a different account. ide-add/ide-switch manage it independently, by
+reading/writing plaintext auth rows in the app's own local sqlite db. Also an
+undocumented on-disk format, same no-stability-guarantee caveat as usage %.
+
 Not implemented, on purpose:
   auto (quota-based auto-switch), tui/watch/menubar (dashboards) - not worth building
     automation on an undocumented endpoint that can break silently.
@@ -532,6 +662,8 @@ case "${1:-}" in
     add)         shift; cmd_add "$@" ;;
     login)       shift; cmd_login "$@" ;;
     add-token)   shift; cmd_add_token "$@" ;;
+    ide-add)     shift; cmd_ide_add "$@" ;;
+    ide-switch|ide-use) shift; cmd_ide_switch "$@" ;;
     switch)      shift; if [[ $# -eq 0 ]]; then cmd_switch_next; else cmd_use "$@"; fi ;;
     use)         shift; cmd_use "$@" ;;
     list|ls)     cmd_list ;;

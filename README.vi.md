@@ -17,10 +17,9 @@ trong file config theo từng project. `cursor-swap` chụp lại (snapshot) cá
 (cộng thêm `authInfo` cache trong `~/.cursor/cli-config.json`) theo từng profile đặt tên, và
 phục hồi lại lúc switch.
 
-**Khác với account của Cursor IDE.** Các item Keychain nói trên chỉ thuộc về CLI — Cursor.app
-(bản desktop editor) dùng 1 item riêng (`Cursor Safe Storage`) để mã hoá local storage của
-nó, nên đổi account CLI không đụng vào session IDE đang chạy. (Đã kiểm chứng bằng cách đọc
-metadata của Keychain item, tool này không đụng/đọc item đó.)
+**Login của Cursor.app là account riêng, tách khỏi CLI** — đổi bên này không đụng bên kia.
+cursor-swap quản lý cả 2, độc lập nhau: `add`/`login`/`switch`/`run` cho session CLI (dựa
+Keychain), `ide-add`/`ide-switch` cho session IDE Cursor.app (dựa sqlite, xem phần dưới).
 
 ## Hai loại account
 
@@ -78,6 +77,10 @@ cd ~/code/some-project
 cursor-swap map work
 cursor-swap run                     # tự chọn "work" theo mapping thư mục
 
+# account IDE Cursor.app (login riêng, tách khỏi CLI - xem phần "Account IDE" bên dưới)
+cursor-swap ide-add work            # chụp lại session IDE đang login hiện tại, lưu thành "work"
+cursor-swap ide-switch work         # đổi session IDE - tự tắt + mở lại Cursor.app
+
 # việc vặt khác
 cursor-swap alias 1 work            # đặt tên tắt cho 1 slot
 cursor-swap disable work            # tạm loại khỏi vòng xoay switch
@@ -103,6 +106,27 @@ gãy âm thầm, lúc đó mấy lệnh này chỉ đơn giản không hiện g�
 này). % usage của 1 profile đã lưu nhưng đang không active phụ thuộc vào access-token đã chụp
 của profile đó còn hạn hay không — nếu hết hạn, `switch` sang account đó 1 lần để refresh lại.
 
+## Account IDE (định dạng lưu không document)
+
+Cursor.app (bản desktop editor) là **login tách riêng khỏi CLI** — có thể đang login account
+hoàn toàn khác. Session của nó không nằm trong Keychain chút nào; nó là 2 dòng plaintext —
+`cursorAuth/accessToken` / `cursorAuth/refreshToken` — trong sqlite db local của chính app
+(`~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`, table `ItemTable`).
+Tìm ra bằng cách đọc file đó (lúc app đã tắt hẳn, để WAL journal được checkpoint) — không
+phải item Keychain `Cursor Safe Storage`, cái đó là key mã hoá riêng của Electron cho mấy thứ
+khác, không liên quan gì đến login của IDE.
+
+- `cursor-swap ide-add <name>` chụp lại session IDE đang login (chạy được dù Cursor.app đang
+  mở hay đã tắt).
+- `cursor-swap ide-switch <ref>` phục hồi lại 1 session. App **phải tắt hẳn** trước — nó chỉ
+  đọc auth từ disk lúc khởi động, và process đang sống có thể ghi đè lại thứ mình vừa ghi.
+  `ide-switch` tự tắt app cho bạn (hỏi xác nhận trước — việc này đóng hết mọi window IDE đang
+  mở) rồi mở lại sau khi xong.
+
+Cùng lưu ý như % usage: **định dạng lưu trên disk không document**, tìm ra bằng cách soi file,
+không phải từ spec chính thức. Cursor update là có thể đổi; nếu `ide-add`/`ide-switch` tự
+nhiên lỗi thì nhiều khả năng do đây — không có cam kết ổn định.
+
 ## Cái này KHÔNG làm được
 
 - **Không auto-switch / tui / watch / menubar.** % usage ở trên đến từ API không document,
@@ -116,9 +140,11 @@ của profile đó còn hạn hay không — nếu hết hạn, `switch` sang ac
 
 Profile được lưu ở `~/.cursor-accounts/<tên>/` (dir mode `700`, file token/key mode `600`) —
 plaintext trên disk, cùng mức tin cậy như file `~/.cursor/cli-config.json` của chính
-`cursor-agent`, và như output của `security find-generic-password`. Ai đọc được account máy
-bạn thì cũng đọc được Keychain item đang sống rồi, tool này không hạ thấp mức bảo mật đó — nhưng
-hãy coi store (và file `export` bất kỳ) như 1 file password thật sự.
+`cursor-agent`, và như output của `security find-generic-password`. File `ide-auth.json` (từ
+`ide-add`) cũng plaintext, cùng mức tin cậy như `state.vscdb` của chính Cursor.app — vốn dĩ đã
+lưu token đó không mã hoá sẵn rồi. Ai đọc được account máy bạn thì cũng đọc được mấy thứ này
+rồi, tool này không hạ thấp mức bảo mật đó — nhưng hãy coi store (và file `export` bất kỳ) như
+1 file password thật sự.
 
 ## License
 
