@@ -1,0 +1,1258 @@
+#!/usr/bin/env bash
+# cursorswap: multi-account switcher for cursor-agent CLI
+#
+# Two account types:
+#   session  - a real browser login (email/password/SSO). Swapping overwrites the
+#              CLI's Keychain items (cursor-access-token / cursor-refresh-token,
+#              account cursor-user) + cached authInfo in ~/.cursor/cli-config.json.
+#              This is GLOBAL state: only one session account can be "active" at a
+#              time on this machine, and swapping mid-session in one terminal
+#              affects `agent` in every other terminal too.
+#   api-key  - a Cursor API key (agent --api-key / $CURSOR_API_KEY). Never touches
+#              global state - passed per-invocation, so `run` with an api-key
+#              profile is safe to use concurrently in multiple terminals.
+#
+# IDE account (ide-add/ide-switch): Cursor.app (the desktop editor) is a SEPARATE
+# login from the CLI - can be on a different account entirely. Its session lives as
+# plaintext cursorAuth/accessToken + cursorAuth/refreshToken rows in the app's own
+# sqlite db (User/globalStorage/state.vscdb, ItemTable), found by reading that file
+# after quitting the app (WAL wasn't checkpointed while it ran) - not the "Cursor
+# Safe Storage" Keychain item, which is Electron's own encryption key for unrelated
+# things. UNDOCUMENTED on-disk format - can change on a Cursor update. Swapping
+# requires the app fully quit first (live process can overwrite the write, and it
+# only reads auth off disk at startup) - ide-switch quits it for you (with confirm)
+# and relaunches after.
+#
+# Usage %: `agent status`/`agent about` expose none, but the CLI's own JS bundle
+# calls an undocumented backend RPC (aiserver.v1.DashboardService/GetCurrentPeriodUsage)
+# with the same Bearer access-token cursorswap already stores per profile. list/switch/
+# usage call it best-effort. UNDOCUMENTED - not a public API, no stability guarantee,
+# can silently break on a Cursor update.
+#
+# `watch` (repeats `list`) and `renumber` (closes slot-number gaps) ARE
+# implemented - both fit fine as plain bash.
+#
+# NOT implemented, on purpose (not just missing):
+#   auto - auto-switch by remaining quota. The usage % above comes from an
+#          undocumented endpoint; building an automated strategy on top of
+#          something that can break silently is a step too far. Use
+#          `cursorswap usage`/`watch` yourself and switch manually.
+#   tui (full-screen interactive UI) / menubar (macOS menu-bar app) - wrong
+#          distribution model for a single self-updating bash script. A TUI
+#          needs a Python+Textual runtime and a second install path; a
+#          menubar app needs its own Swift/rumps build, code signing, and
+#          notarization. Would be a separate project, not a feature of this
+#          file.
+
+set -euo pipefail
+
+VERSION="1.7.0"
+STORE="${CURSOR_SWAP_STORE:-$HOME/.cursor-accounts}"
+MAPFILE="$STORE/mappings.json"
+CONFIG="$HOME/.cursor/cli-config.json"
+RAW_BASE="https://raw.githubusercontent.com/CuKhoi/cursor-switch/main"
+API_BASE="https://api2.cursor.sh"
+SVC_ACCESS="cursor-access-token"
+SVC_REFRESH="cursor-refresh-token"
+KC_ACCOUNT="cursor-user"
+IDE_DB="$HOME/Library/Application Support/Cursor/User/globalStorage/state.vscdb"
+
+# ---- color palette --------------------------------------------------------
+# Single warm accent (xterm-256 173, same terracotta tone claude-swap's CLI
+# printer uses), muted gray for secondary text, bold for structure, a
+# green/amber/red severity ramp for usage %. Off for NO_COLOR, non-tty, or
+# TERM=dumb; on for FORCE_COLOR. Same convention as claude-swap's printer.py.
+_supports_color() {
+    [[ -n "${NO_COLOR:-}" ]] && return 1
+    [[ -n "${FORCE_COLOR:-}" ]] && return 0
+    [[ -t 1 ]] || return 1
+    [[ "${TERM:-}" == "dumb" ]] && return 1
+    return 0
+}
+if _supports_color; then
+    C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
+    C_ACCENT=$'\033[38;5;173m'; C_MUTED=$'\033[38;5;250m'
+    C_RED=$'\033[31m'; C_YELLOW=$'\033[33m'
+    C_OK=$'\033[38;5;108m'; C_WARN=$'\033[38;5;179m'; C_CRIT=$'\033[38;5;167m'
+else
+    C_RESET=""; C_BOLD=""; C_DIM=""
+    C_ACCENT=""; C_MUTED=""
+    C_RED=""; C_YELLOW=""
+    C_OK=""; C_WARN=""; C_CRIT=""
+fi
+_accent() { printf '%s%s%s' "$C_ACCENT" "$1" "$C_RESET"; }
+_muted()  { printf '%s%s%s' "$C_MUTED" "$1" "$C_RESET"; }
+_dimmed() { printf '%s%s%s' "$C_DIM" "$1" "$C_RESET"; }
+_bold_accent() { printf '%s%s%s%s' "$C_BOLD" "$C_ACCENT" "$1" "$C_RESET"; }
+_bold()   { printf '%s%s%s' "$C_BOLD" "$1" "$C_RESET"; }
+# colors a "N" percent value green/amber/red by the same 70/90 thresholds
+# claude-swap's usage bars use, and appends the "%" itself.
+_sev_pct() {
+    local p="$1" color
+    color=$(awk -v p="$p" 'BEGIN{ if (p>=90) print "CRIT"; else if (p>=70) print "WARN"; else print "OK" }')
+    case "$color" in CRIT) color="$C_CRIT" ;; WARN) color="$C_WARN" ;; *) color="$C_OK" ;; esac
+    printf '%s%s%%%s' "$color" "$p" "$C_RESET"
+}
+
+# ---- i18n ------------------------------------------------------------------
+# CURSOR_SWAP_LANG=vi (or --lang vi) switches user-facing text to Vietnamese.
+# Falls back to English for any key missing from MSG_VI, and to the key
+# itself if somehow missing from MSG_EN too - _t() never returns empty or
+# fails, so a missed translation degrades to readable English instead of a
+# blank line or (under `set -e`) killing the script outright.
+#
+# Uses {1}/{2}/... placeholders instead of printf %-specifiers: several
+# messages contain a literal "%" (e.g. "usage %"), which a printf format
+# string would misparse as a conversion spec.
+declare -A MSG_EN=() MSG_VI=()
+CURSOR_SWAP_LANG="${CURSOR_SWAP_LANG:-en}"
+
+_t() {
+    local key="$1"; shift
+    local msg="${MSG_EN[$key]:-$key}"
+    [[ "$CURSOR_SWAP_LANG" == "vi" && -n "${MSG_VI[$key]:-}" ]] && msg="${MSG_VI[$key]}"
+    local i=1 v
+    for v in "$@"; do
+        msg="${msg//\{$i\}/$v}"
+        i=$((i + 1))
+    done
+    printf '%s' "$msg"
+}
+
+MSG_EN[aborted]="aborted"
+MSG_VI[aborted]="đã huỷ"
+MSG_EN[jq_required]="jq required"
+MSG_VI[jq_required]="cần có jq"
+
+die() { echo "${C_RED}$(_t err_prefix)$*${C_RESET}" >&2; exit 1; }
+MSG_EN[err_prefix]="error: "
+MSG_VI[err_prefix]="lỗi: "
+need_jq() { command -v jq >/dev/null || die "$(_t jq_required)"; }
+
+confirm() {
+    [[ "${YES:-0}" == "1" ]] && return 0
+    read -r -p "${C_YELLOW}$1${C_RESET} $(_t confirm_suffix) " ans
+    if [[ "$CURSOR_SWAP_LANG" == "vi" ]]; then
+        [[ "$ans" =~ ^[Cc]$ ]]
+    else
+        [[ "$ans" =~ ^[Yy]$ ]]
+    fi
+}
+MSG_EN[confirm_suffix]="[y/N]"
+MSG_VI[confirm_suffix]="[c/K]"
+
+# ---- message catalog (everything else) -------------------------------------
+MSG_EN[err_no_match]="no account matches '{1}' (see: cursorswap list)"
+MSG_VI[err_no_match]="không tìm thấy account nào khớp '{1}' (xem: cursorswap list)"
+
+MSG_EN[err_no_cli_access]="no active session (cursor-access-token not in Keychain). Run 'agent login' first."
+MSG_VI[err_no_cli_access]="chưa có session nào (không có cursor-access-token trong Keychain). Chạy 'agent login' trước."
+MSG_EN[err_no_cli_refresh]="no active session (cursor-refresh-token not in Keychain)."
+MSG_VI[err_no_cli_refresh]="chưa có session nào (không có cursor-refresh-token trong Keychain)."
+MSG_EN[err_config_not_found]="{1} not found"
+MSG_VI[err_config_not_found]="không thấy {1}"
+MSG_EN[confirm_overwrite]="Profile '{1}' exists ({2}). Overwrite?"
+MSG_VI[confirm_overwrite]="Profile '{1}' đã có ({2}). Ghi đè?"
+MSG_EN[msg_saved_cli]="Saved '{1}' ({2}) as slot {3}"
+MSG_VI[msg_saved_cli]="Đã lưu '{1}' ({2}) thành slot {3}"
+
+MSG_EN[usage_add]="usage: cursorswap add <name> [--alias X]"
+MSG_VI[usage_add]="cách dùng: cursorswap add <tên> [--alias X]"
+MSG_EN[note_no_cli]="note: no active CLI session (agent not logged in) - skipping CLI capture"
+MSG_VI[note_no_cli]="lưu ý: chưa login CLI (agent chưa login) - bỏ qua chụp CLI"
+MSG_EN[note_no_ide]="note: no active Cursor.app IDE session - skipping IDE capture"
+MSG_VI[note_no_ide]="lưu ý: chưa login IDE Cursor.app - bỏ qua chụp IDE"
+MSG_EN[err_not_logged_in_anywhere]="not logged in anywhere - run 'agent login' or log into the Cursor.app IDE first"
+MSG_VI[err_not_logged_in_anywhere]="chưa login ở đâu cả - chạy 'agent login' hoặc login IDE Cursor.app trước"
+
+MSG_EN[usage_login]="usage: cursorswap login <name>"
+MSG_VI[usage_login]="cách dùng: cursorswap login <tên>"
+MSG_EN[msg_logging_out]="Logging out current session..."
+MSG_VI[msg_logging_out]="Đang logout session hiện tại..."
+MSG_EN[msg_opening_browser]="Opening browser login for new account..."
+MSG_VI[msg_opening_browser]="Đang mở browser để login account mới..."
+
+MSG_EN[usage_add_token]="usage: cursorswap add-token <key|-> [--email E] [--alias A]"
+MSG_VI[usage_add_token]="cách dùng: cursorswap add-token <key|-> [--email E] [--alias A]"
+MSG_EN[msg_registered_api_key]="Registered API-key profile '{1}' as slot {2}"
+MSG_VI[msg_registered_api_key]="Đã đăng ký profile API-key '{1}' thành slot {2}"
+
+MSG_EN[usage_ide_add]="usage: cursorswap ide-add <name> [--alias X]"
+MSG_VI[usage_ide_add]="cách dùng: cursorswap ide-add <tên> [--alias X]"
+MSG_EN[err_ide_db_not_found]="{1} not found - is Cursor.app installed?"
+MSG_VI[err_ide_db_not_found]="không thấy {1} - Cursor.app đã cài chưa?"
+MSG_EN[err_no_ide_rows]="no cursorAuth/* rows in Cursor.app's local db - log into the IDE first"
+MSG_VI[err_no_ide_rows]="không có dòng cursorAuth/* nào trong db local của Cursor.app - login IDE trước"
+MSG_EN[err_no_cached_email]="couldn't find a cached email for the current IDE session (cachedEmail not populated yet - wait a few seconds in the IDE and retry)"
+MSG_VI[err_no_cached_email]="không tìm được email cache cho session IDE hiện tại (cachedEmail chưa kịp cập nhật - đợi vài giây trong IDE rồi thử lại)"
+MSG_EN[msg_saved_ide]="Saved IDE session '{1}' ({2}) as slot {3}"
+MSG_VI[msg_saved_ide]="Đã lưu session IDE '{1}' ({2}) thành slot {3}"
+
+MSG_EN[err_no_ide_captured]="{1} has no captured IDE session (see: cursorswap ide-add)"
+MSG_VI[err_no_ide_captured]="{1} chưa chụp session IDE nào (xem: cursorswap ide-add)"
+MSG_EN[err_no_ide_captured_ref]="{1} has no captured IDE session (see: cursorswap ide-add {2})"
+MSG_VI[err_no_ide_captured_ref]="{1} chưa chụp session IDE nào (xem: cursorswap ide-add {2})"
+MSG_EN[err_ide_write_failed]="couldn't write to {1} (still locked, or db format changed - undocumented, no stability guarantee)"
+MSG_VI[err_ide_write_failed]="ghi vào {1} thất bại (còn bị khoá, hoặc db đổi định dạng - không document, không cam kết ổn định)"
+
+MSG_EN[confirm_ide_quit]="Cursor.app is running and must be fully quit to swap its session safely (all windows will close, then reopen). Continue?"
+MSG_VI[confirm_ide_quit]="Cursor.app đang chạy, cần tắt hẳn mới đổi session an toàn (đóng hết mọi window, rồi mở lại). Tiếp tục?"
+MSG_EN[err_ide_quit_timeout]="Cursor.app didn't quit in time - close it manually and retry"
+MSG_VI[err_ide_quit_timeout]="Cursor.app không tắt kịp - tắt tay rồi thử lại"
+MSG_EN[msg_swapped_ide]="Swapped IDE session to {1}."
+MSG_VI[msg_swapped_ide]="Đã đổi session IDE sang {1}."
+MSG_EN[msg_relaunched]="Relaunched Cursor.app."
+MSG_VI[msg_relaunched]="Đã mở lại Cursor.app."
+MSG_EN[msg_ide_not_running]="Cursor.app wasn't running - it'll pick this up next time it starts."
+MSG_VI[msg_ide_not_running]="Cursor.app không chạy - nó sẽ tự nhận session mới ở lần mở kế tiếp."
+
+MSG_EN[usage_ide_switch]="usage: cursorswap ide-switch <slot|name|alias|email>"
+MSG_VI[usage_ide_switch]="cách dùng: cursorswap ide-switch <slot|tên|alias|email>"
+
+MSG_EN[err_apikey_no_switch]="{1} is an api-key profile - global switch doesn't apply. Use: cursorswap run {2} -- ..."
+MSG_VI[err_apikey_no_switch]="{1} là profile api-key - switch toàn cục không áp dụng. Dùng: cursorswap run {2} -- ..."
+MSG_EN[msg_ide_only_switch]="{1} has no CLI session captured - switching the IDE session only."
+MSG_VI[msg_ide_only_switch]="{1} chưa chụp session CLI - chỉ đổi session IDE thôi."
+MSG_EN[msg_usage_prefix]="Usage: {1}"
+MSG_VI[msg_usage_prefix]="Usage: {1}"
+MSG_EN[msg_already_on]="Already on {1} ({2})"
+MSG_VI[msg_already_on]="Đang ở {1} ({2}) rồi"
+MSG_EN[msg_swapped_verifying]="Swapped to {1}. Verifying:"
+MSG_VI[msg_swapped_verifying]="Đã đổi sang {1}. Đang xác nhận:"
+
+MSG_EN[usage_switch]="usage: cursorswap switch <slot|name|alias|email>"
+MSG_VI[usage_switch]="cách dùng: cursorswap switch <slot|tên|alias|email>"
+MSG_EN[err_no_accounts]="no session or IDE-only accounts saved (see: cursorswap add)"
+MSG_VI[err_no_accounts]="chưa lưu account session hay ide-only nào (xem: cursorswap add)"
+
+MSG_EN[hdr_accounts]="Accounts:"
+MSG_VI[hdr_accounts]="Các account:"
+MSG_EN[tag_cli_active]="(cli active)"
+MSG_VI[tag_cli_active]="(cli đang dùng)"
+MSG_EN[tag_ide_active]="(ide active)"
+MSG_VI[tag_ide_active]="(ide đang dùng)"
+MSG_EN[tag_disabled]="[disabled]"
+MSG_VI[tag_disabled]="[đã tắt]"
+MSG_EN[tag_apikey]="[api-key, use: run]"
+MSG_VI[tag_apikey]="[api-key, dùng: run]"
+MSG_EN[tag_ideonly]="[ide-only, use: ide-switch]"
+MSG_VI[tag_ideonly]="[chỉ-ide, dùng: ide-switch]"
+MSG_EN[lbl_saved]="saved:"
+MSG_VI[lbl_saved]="lưu lúc:"
+MSG_EN[lbl_usage]="usage:"
+MSG_VI[lbl_usage]="usage:"
+MSG_EN[lbl_ide]="ide:"
+MSG_VI[lbl_ide]="ide:"
+MSG_EN[msg_none_saved]="(none - use: cursorswap add <name> / login <name> / add-token <key>)"
+MSG_VI[msg_none_saved]="(chưa có gì - dùng: cursorswap add <tên> / login <tên> / add-token <key>)"
+MSG_EN[note_usage_line1]="Note: usage % is from an undocumented Cursor API (best-effort, may show nothing"
+MSG_VI[note_usage_line1]="Lưu ý: % usage lấy từ API không document của Cursor (best-effort, có thể không hiện gì"
+MSG_EN[note_usage_line2]="      if a saved token expired - switch to that account to refresh it)."
+MSG_VI[note_usage_line2]="      nếu token lưu đã hết hạn - switch sang account đó để làm mới)."
+
+MSG_EN[err_no_session_or_ide]="{1} has no CLI or IDE session captured (type: {2}) - usage % needs one"
+MSG_VI[err_no_session_or_ide]="{1} chưa chụp session CLI hay IDE nào (type: {2}) - usage % cần có 1 trong 2"
+MSG_EN[err_no_token]="no stored access-token for {1}"
+MSG_VI[err_no_token]="không có access-token lưu sẵn cho {1}"
+MSG_EN[err_no_active_session]="no active CLI or IDE session (see: cursorswap switch)"
+MSG_VI[err_no_active_session]="chưa có session CLI hay IDE nào đang active (xem: cursorswap switch)"
+MSG_EN[err_usage_failed]="usage lookup failed - token may be expired, or Cursor's internal API changed (undocumented, no stability guarantee)"
+MSG_VI[err_usage_failed]="tra usage thất bại - token có thể hết hạn, hoặc API nội bộ của Cursor đã đổi (không document, không cam kết ổn định)"
+
+MSG_EN[usage_remove]="usage: cursorswap remove <slot|name|alias|email>"
+MSG_VI[usage_remove]="cách dùng: cursorswap remove <slot|tên|alias|email>"
+MSG_EN[usage_enable_disable]="usage: cursorswap {1} <slot|name|alias|email>"
+MSG_VI[usage_enable_disable]="cách dùng: cursorswap {1} <slot|tên|alias|email>"
+MSG_EN[confirm_delete]="Delete saved profile {1}?"
+MSG_VI[confirm_delete]="Xoá profile đã lưu {1}?"
+MSG_EN[msg_removed]="Removed {1}"
+MSG_VI[msg_removed]="Đã xoá {1}"
+
+MSG_EN[msg_enabled]="Enabled {1}"
+MSG_VI[msg_enabled]="Đã bật {1}"
+MSG_EN[msg_disabled]="Disabled {1}"
+MSG_VI[msg_disabled]="Đã tắt {1}"
+
+MSG_EN[msg_unset_alias]="Unset alias for {1}"
+MSG_VI[msg_unset_alias]="Đã gỡ alias của {1}"
+MSG_EN[usage_alias]="usage: cursorswap alias <slot|name> <short>"
+MSG_VI[usage_alias]="cách dùng: cursorswap alias <slot|tên> <tên-tắt>"
+MSG_EN[msg_alias_set]="Alias '{1}' -> {2}"
+MSG_VI[msg_alias_set]="Alias '{1}' -> {2}"
+
+MSG_EN[msg_mapped]="Mapped {1} -> {2}"
+MSG_VI[msg_mapped]="Đã gán {1} -> {2}"
+MSG_EN[msg_unmapped]="Unmapped {1}"
+MSG_VI[msg_unmapped]="Đã bỏ gán {1}"
+
+MSG_EN[err_no_account_no_mapping]="no account given and no directory mapping for {1} (see: cursorswap map)"
+MSG_VI[err_no_account_no_mapping]="không cho account, và {1} cũng chưa được gán (xem: cursorswap map)"
+MSG_EN[err_ideonly_no_run]="{1} only has an IDE session captured, no CLI session to run with."
+MSG_VI[err_ideonly_no_run]="{1} chỉ có session IDE, không có session CLI để chạy 'run'."
+MSG_EN[warn_run_line1]="warning: {1} is a session account - 'run' will swap the global CLI session,"
+MSG_VI[warn_run_line1]="cảnh báo: {1} là account session - 'run' sẽ đổi session CLI toàn cục,"
+MSG_EN[warn_run_line2]="         execute, then swap back. Other terminals using cursor-agent during this window"
+MSG_VI[warn_run_line2]="         chạy lệnh, rồi đổi lại. Terminal khác đang dùng cursor-agent trong lúc này"
+MSG_EN[warn_run_line3]="         will see the wrong account. Prefer an api-key profile for concurrent use."
+MSG_VI[warn_run_line3]="         sẽ thấy nhầm account. Nên dùng profile api-key nếu cần chạy song song."
+MSG_EN[confirm_continue]="Continue?"
+MSG_VI[confirm_continue]="Tiếp tục?"
+MSG_EN[note_prev_not_saved]="note: previous session ({1}) wasn't a saved profile - not restored. Run 'cursorswap add <name>' beforehand next time."
+MSG_VI[note_prev_not_saved]="lưu ý: session trước ({1}) không phải profile đã lưu - không phục hồi được. Lần sau chạy 'cursorswap add <tên>' trước."
+
+MSG_EN[usage_export]="usage: cursorswap export <path.tar.gz>"
+MSG_VI[usage_export]="cách dùng: cursorswap export <path.tar.gz>"
+MSG_EN[msg_exported]="Exported {1} profile dir(s) to {2}"
+MSG_VI[msg_exported]="Đã export {1} thư mục profile vào {2}"
+MSG_EN[warn_export_plaintext]="warning: this archive contains plaintext tokens/api keys - handle like a password file."
+MSG_VI[warn_export_plaintext]="cảnh báo: file nén này chứa token/api key dạng plaintext - xử lý như file password."
+
+MSG_EN[usage_import]="usage: cursorswap import <path.tar.gz>"
+MSG_VI[usage_import]="cách dùng: cursorswap import <path.tar.gz>"
+MSG_EN[err_path_not_found]="{1} not found"
+MSG_VI[err_path_not_found]="không thấy {1}"
+MSG_EN[msg_skip_import]="skip '{1}' (exists, use --force to overwrite)"
+MSG_VI[msg_skip_import]="bỏ qua '{1}' (đã có, dùng --force để ghi đè)"
+MSG_EN[msg_imported]="imported '{1}'"
+MSG_VI[msg_imported]="đã import '{1}'"
+
+MSG_EN[confirm_purge]="Delete ALL cursorswap data in {1}?"
+MSG_VI[confirm_purge]="Xoá TOÀN BỘ dữ liệu cursorswap trong {1}?"
+MSG_EN[msg_purged]="Purged {1}"
+MSG_VI[msg_purged]="Đã xoá sạch {1}"
+
+MSG_EN[err_not_writable]="{1} not writable - re-run with sufficient permissions"
+MSG_VI[err_not_writable]="{1} không ghi được - chạy lại với quyền đủ"
+MSG_EN[err_download_failed]="download failed"
+MSG_VI[err_download_failed]="tải thất bại"
+MSG_EN[msg_already_uptodate]="cursorswap is already up to date ({1})"
+MSG_VI[msg_already_uptodate]="cursorswap đã là bản mới nhất ({1})"
+MSG_EN[msg_updated]="Updated cursorswap: {1} -> {2}"
+MSG_VI[msg_updated]="Đã cập nhật cursorswap: {1} -> {2}"
+
+MSG_EN[err_unknown_command]="unknown command '{1}' (see: cursorswap --help)"
+MSG_VI[err_unknown_command]="không nhận ra lệnh '{1}' (xem: cursorswap --help)"
+
+current_email() {
+    [[ -f "$CONFIG" ]] && jq -r '.authInfo.email // "unknown"' "$CONFIG" 2>/dev/null || echo "unknown"
+}
+
+current_ide_email() {
+    [[ -f "$IDE_DB" ]] || return
+    local email; email=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/cachedEmail';" 2>/dev/null)
+    if [[ -z "$email" ]]; then
+        # cachedEmail can lag behind a fresh login for a bit - fall back to
+        # matching the token's auth0 sub against a saved CLI profile's authId.
+        local sub token
+        token=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';" 2>/dev/null)
+        sub=$(_jwt_sub "$token")
+        if [[ -n "$sub" ]]; then
+            for cfg in "$STORE"/*/cli-config.json; do
+                [[ -f "$cfg" ]] || continue
+                if [[ "$(jq -r '.authInfo.authId // empty' "$cfg" 2>/dev/null)" == "$sub" ]]; then
+                    email=$(jq -r '.authInfo.email' "$cfg")
+                    break
+                fi
+            done
+        fi
+    fi
+    echo "$email"
+}
+
+ensure_store() { mkdir -p "$STORE"; chmod 700 "$STORE"; [[ -f "$MAPFILE" ]] || echo '{}' > "$MAPFILE"; }
+
+next_slot() {
+    local max=0 s
+    for m in "$STORE"/*/meta.json; do
+        [[ -f "$m" ]] || continue
+        s=$(jq -r '.slot // 0' "$m")
+        (( s > max )) && max=$s
+    done
+    echo $((max + 1))
+}
+
+# echoes the profile dir for a slot number / name / alias / email, or nothing
+resolve_profile() {
+    local ref="$1" dir name
+    for dir in "$STORE"/*/; do
+        [[ -f "$dir/meta.json" ]] || continue
+        name=$(basename "$dir")
+        if [[ "$name" == "$ref" ]]; then echo "${dir%/}"; return; fi
+        if [[ "$(jq -r '.slot' "$dir/meta.json")" == "$ref" ]]; then echo "${dir%/}"; return; fi
+        if [[ "$(jq -r '.alias // empty' "$dir/meta.json")" == "$ref" ]]; then echo "${dir%/}"; return; fi
+        if [[ "$(jq -r '.email' "$dir/meta.json")" == "$ref" ]]; then echo "${dir%/}"; return; fi
+    done
+}
+
+require_profile() {
+    local ref="$1" dir
+    dir=$(resolve_profile "$ref")
+    [[ -n "$dir" ]] || die "$(_t err_no_match "$ref")"
+    echo "$dir"
+}
+
+label() {
+    local dir="$1" name alias
+    name=$(basename "$dir")
+    alias=$(jq -r '.alias // empty' "$dir/meta.json")
+    [[ -n "$alias" ]] && echo "$(_accent "$name") $(_muted "($alias)")" || _accent "$name"
+}
+
+# any access token this profile has, CLI's or the IDE's - the usage-% API
+# doesn't care which surface a token came from, it's the same backend.
+_any_access_token() {
+    local dir="$1"
+    if [[ -f "$dir/access-token" ]]; then
+        cat "$dir/access-token" 2>/dev/null
+    elif [[ -f "$dir/ide-auth.json" ]]; then
+        jq -r '.[] | select(.key=="cursorAuth/accessToken") | .value' "$dir/ide-auth.json" 2>/dev/null
+    fi
+}
+
+# best token to use for usage-% on this profile: if it's the CURRENTLY active
+# one (CLI or IDE), read the live token instead of the snapshot - Cursor
+# rotates access tokens over time even while a session stays logged in, so a
+# snapshot from whenever add/ide-add ran can go stale while still "active".
+# Falls back to the snapshot for anything not currently active.
+_effective_access_token() {
+    local dir="$1" type email ide_email
+    type=$(jq -r '.type' "$dir/meta.json")
+    email=$(jq -r '.email' "$dir/meta.json")
+    ide_email=$(jq -r '.ide_email // empty' "$dir/meta.json")
+
+    if [[ "$type" == "session" && "$email" == "$(current_email)" ]] && _has_cli_session; then
+        local tok; tok=$(security find-generic-password -s "$SVC_ACCESS" -a "$KC_ACCOUNT" -w 2>/dev/null)
+        [[ -n "$tok" ]] && { echo "$tok"; return; }
+    fi
+    if [[ -n "$ide_email" ]]; then
+        local now_ide; now_ide=$(current_ide_email)
+        if [[ -n "$now_ide" && "$ide_email" == "$now_ide" ]]; then
+            local tok; tok=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';" 2>/dev/null)
+            [[ -n "$tok" ]] && { echo "$tok"; return; }
+        fi
+    fi
+    _any_access_token "$dir"
+}
+
+# best-effort: prints "  total: N%  auto: N%  api: N%" for a given access token,
+# or nothing + non-zero exit on any failure (expired token, network, API shape changed).
+usage_summary() {
+    local token="$1" resp
+    [[ -n "$token" ]] || return 1
+    resp=$(curl -sS --max-time 4 -X POST "$API_BASE/aiserver.v1.DashboardService/GetCurrentPeriodUsage" \
+        -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+        -H "Connect-Protocol-Version: 1" -d '{}' 2>/dev/null) || return 1
+    jq -e '.planUsage.totalPercentUsed' <<<"$resp" >/dev/null 2>&1 || return 1
+    local total auto api
+    read -r total auto api < <(jq -r 'def r1: (.*10|round)/10;
+        .planUsage | "\((.totalPercentUsed // 0)|r1) \((.autoPercentUsed // 0)|r1) \((.apiPercentUsed // 0)|r1)"' <<<"$resp")
+    printf '%s %s  %s %s  %s %s' \
+        "$(_muted total:)" "$(_sev_pct "$total")" \
+        "$(_muted auto:)"  "$(_sev_pct "$auto")" \
+        "$(_muted api:)"   "$(_sev_pct "$api")"
+}
+
+# ---- capture a live session account into a profile dir ----
+capture_session() {
+    local name="$1" access refresh email dir alias="${2:-}"
+    access=$(security find-generic-password -s "$SVC_ACCESS" -a "$KC_ACCOUNT" -w 2>/dev/null) || die "$(_t err_no_cli_access)"
+    refresh=$(security find-generic-password -s "$SVC_REFRESH" -a "$KC_ACCOUNT" -w 2>/dev/null) || die "$(_t err_no_cli_refresh)"
+    [[ -f "$CONFIG" ]] || die "$(_t err_config_not_found "$CONFIG")"
+    email=$(current_email)
+
+    dir="$STORE/$name"
+    local slot
+    if [[ -d "$dir" ]]; then
+        confirm "$(_t confirm_overwrite "$name" "$(jq -r '.email' "$dir/meta.json" 2>/dev/null || echo '?')")" || { echo "$(_t aborted)"; exit 1; }
+        slot=$(jq -r '.slot' "$dir/meta.json")
+        [[ -z "$alias" ]] && alias=$(jq -r '.alias // empty' "$dir/meta.json")
+    else
+        slot=$(next_slot)
+    fi
+    mkdir -p "$dir"; chmod 700 "$dir"
+    printf '%s' "$access"  > "$dir/access-token";  chmod 600 "$dir/access-token"
+    printf '%s' "$refresh" > "$dir/refresh-token"; chmod 600 "$dir/refresh-token"
+    cp "$CONFIG" "$dir/cli-config.json"
+    jq -n --arg email "$email" --arg ts "$(date -u +%FT%TZ)" --argjson slot "$slot" \
+        --arg alias "$alias" --arg type "session" \
+        '{email:$email, saved_at:$ts, slot:$slot, alias:(if $alias=="" then null else $alias end), type:$type, enabled:true}' \
+        > "$dir/meta.json"
+    echo "$(_t msg_saved_cli "$name" "$email" "$slot")"
+}
+
+_has_cli_session() {
+    security find-generic-password -s "$SVC_ACCESS" -a "$KC_ACCOUNT" -w >/dev/null 2>&1
+}
+
+_has_ide_session() {
+    [[ -f "$IDE_DB" ]] || return 1
+    local v; v=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';" 2>/dev/null)
+    [[ -n "$v" ]]
+}
+
+# captures whichever of CLI / Cursor.app IDE is currently logged in - either,
+# both, or (if neither) errors. Most people only use one or the other, so
+# this doesn't require both like the old always-capture-CLI version did.
+cmd_add() {
+    local name="" alias=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --alias) alias="$2"; shift 2 ;;
+            *) name="$1"; shift ;;
+        esac
+    done
+    [[ -n "$name" ]] || die "$(_t usage_add)"
+    ensure_store
+
+    local got_cli=0 got_ide=0
+    if _has_cli_session; then
+        capture_session "$name" "$alias"
+        got_cli=1
+    else
+        echo "$(_t note_no_cli)"
+    fi
+    if _has_ide_session; then
+        local ide_args=("$name")
+        [[ -n "$alias" ]] && ide_args+=(--alias "$alias")
+        cmd_ide_add "${ide_args[@]}"
+        got_ide=1
+    else
+        echo "$(_t note_no_ide)"
+    fi
+    (( got_cli || got_ide )) || die "$(_t err_not_logged_in_anywhere)"
+}
+
+cmd_login() {
+    local name="${1:?$(_t usage_login)}"
+    ensure_store
+    echo "$(_t msg_logging_out)"
+    agent logout >/dev/null 2>&1 || true
+    echo "$(_t msg_opening_browser)"
+    agent login
+    capture_session "$name"
+}
+
+cmd_add_token() {
+    need_jq; ensure_store
+    local token="${1:?$(_t usage_add_token)}"; shift || true
+    local email="" alias=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --email) email="$2"; shift 2 ;;
+            --alias) alias="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    [[ "$token" == "-" ]] && token=$(cat)
+    local slot; slot=$(next_slot)
+    [[ -n "$email" ]] || email="api-key-${slot}@token.local"
+    local dir="$STORE/$email"
+    mkdir -p "$dir"; chmod 700 "$dir"
+    printf '%s' "$token" > "$dir/api-key"; chmod 600 "$dir/api-key"
+    jq -n --arg email "$email" --arg ts "$(date -u +%FT%TZ)" --argjson slot "$slot" \
+        --arg alias "$alias" --arg type "api-key" \
+        '{email:$email, saved_at:$ts, slot:$slot, alias:(if $alias=="" then null else $alias end), type:$type, enabled:true}' \
+        > "$dir/meta.json"
+    echo "$(_t msg_registered_api_key "$email" "$slot")"
+}
+
+_ide_running() { pgrep -x Cursor >/dev/null 2>&1; }
+
+# decodes the auth0 subject ("sub") claim out of a Cursor JWT's payload, no
+# verification (we already trust it - it's our own stored token).
+_jwt_sub() {
+    local payload; payload=$(cut -d. -f2 <<<"$1" | tr -- '-_' '+/')
+    case $(( ${#payload} % 4 )) in
+        2) payload="${payload}==" ;;
+        3) payload="${payload}=" ;;
+    esac
+    base64 -d <<<"$payload" 2>/dev/null | jq -r '.sub // empty' 2>/dev/null
+}
+
+# jq program that turns [{key,value},...] rows into REPLACE-on-conflict INSERT
+# statements (ItemTable.key is UNIQUE ON CONFLICT REPLACE, so a plain INSERT
+# acts as an upsert). Built via a quoted heredoc so the SQL quote-escaping
+# (' -> '') needs no bash-level escaping of its own.
+IFS= read -r -d '' _IDE_ROWS_TO_SQL <<'JQEOF' || true
+def esc: gsub("'"; "''");
+.[] | "INSERT INTO ItemTable(key,value) VALUES('" + (.key|esc) + "', '" + ((.value|tostring)|esc) + "');"
+JQEOF
+
+cmd_ide_add() {
+    need_jq; ensure_store
+    local name="" alias=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --alias) alias="$2"; shift 2 ;;
+            *) name="$1"; shift ;;
+        esac
+    done
+    [[ -n "$name" ]] || die "$(_t usage_ide_add)"
+    [[ -f "$IDE_DB" ]] || die "$(_t err_ide_db_not_found "$IDE_DB")"
+
+    local rows; rows=$(sqlite3 -json "$IDE_DB" "SELECT key, value FROM ItemTable WHERE key LIKE 'cursorAuth/%';" 2>/dev/null)
+    [[ -n "$rows" && "$rows" != "[]" ]] || die "$(_t err_no_ide_rows)"
+    local ide_email; ide_email=$(jq -r '.[] | select(.key=="cursorAuth/cachedEmail") | .value' <<<"$rows")
+    if [[ -z "$ide_email" ]]; then
+        # right after a fresh IDE login, cachedEmail can lag behind the tokens
+        # for a bit - fall back to matching the token's auth0 sub against a
+        # saved CLI profile's own cached authId.
+        local access_token sub
+        access_token=$(jq -r '.[] | select(.key=="cursorAuth/accessToken") | .value' <<<"$rows")
+        sub=$(_jwt_sub "$access_token")
+        if [[ -n "$sub" ]]; then
+            for cfg in "$STORE"/*/cli-config.json; do
+                [[ -f "$cfg" ]] || continue
+                if [[ "$(jq -r '.authInfo.authId // empty' "$cfg")" == "$sub" ]]; then
+                    ide_email=$(jq -r '.authInfo.email' "$cfg")
+                    break
+                fi
+            done
+        fi
+    fi
+    [[ -n "$ide_email" ]] || die "$(_t err_no_cached_email)"
+
+    local dir="$STORE/$name" slot
+    if [[ -d "$dir" ]]; then
+        slot=$(jq -r '.slot' "$dir/meta.json")
+        [[ -z "$alias" ]] && alias=$(jq -r '.alias // empty' "$dir/meta.json")
+    else
+        slot=$(next_slot)
+    fi
+    mkdir -p "$dir"; chmod 700 "$dir"
+    echo "$rows" > "$dir/ide-auth.json"; chmod 600 "$dir/ide-auth.json"
+
+    if [[ -f "$dir/meta.json" ]]; then
+        jq --arg e "$ide_email" '.ide_email = $e' "$dir/meta.json" > "$dir/meta.json.tmp" && mv "$dir/meta.json.tmp" "$dir/meta.json"
+    else
+        jq -n --arg email "$ide_email" --arg ts "$(date -u +%FT%TZ)" --argjson slot "$slot" \
+            --arg alias "$alias" \
+            '{email:$email, ide_email:$email, saved_at:$ts, slot:$slot, alias:(if $alias=="" then null else $alias end), type:"ide-only", enabled:true}' \
+            > "$dir/meta.json"
+    fi
+    echo "$(_t msg_saved_ide "$name" "$ide_email" "$slot")"
+}
+
+_restore_ide_session() {
+    local dir="$1"
+    [[ -f "$dir/ide-auth.json" ]] || die "$(_t err_no_ide_captured "$(label "$dir")")"
+    local sql; sql=$(jq -r "$_IDE_ROWS_TO_SQL" "$dir/ide-auth.json")
+    # right after Cursor.app exits, a helper process can briefly still hold the
+    # sqlite file lock - retry a couple times before giving up.
+    local tries=0
+    until sqlite3 "$IDE_DB" "$sql" 2>/dev/null; do
+        (( tries++ >= 4 )) && die "$(_t err_ide_write_failed "$IDE_DB")"
+        sleep 1
+    done
+}
+
+# does the actual quit -> write -> relaunch dance for a profile's IDE session.
+# caller must have already confirmed $dir/ide-auth.json exists.
+_do_ide_switch() {
+    local dir="$1"
+    [[ -f "$IDE_DB" ]] || die "$(_t err_ide_db_not_found "$IDE_DB")"
+
+    local was_running=0
+    if _ide_running; then
+        was_running=1
+        confirm "$(_t confirm_ide_quit)" \
+            || { echo "$(_t aborted)"; exit 1; }
+        osascript -e 'quit app "Cursor"' >/dev/null 2>&1 || true
+        local waited=0
+        while _ide_running && (( waited < 15 )); do sleep 1; waited=$((waited + 1)); done
+        _ide_running && die "$(_t err_ide_quit_timeout)"
+    fi
+
+    _restore_ide_session "$dir"
+    echo "$(_t msg_swapped_ide "$(label "$dir")")"
+    if [[ "$was_running" == "1" ]]; then
+        open -a "Cursor"
+        echo "$(_t msg_relaunched)"
+    else
+        echo "$(_t msg_ide_not_running)"
+    fi
+}
+
+# switches the IDE session too, but only if this profile ever captured one
+# (cursorswap ide-add) - silent no-op otherwise, so plain CLI-only users see
+# no difference.
+_maybe_switch_ide() {
+    local dir="$1"
+    [[ -f "$dir/ide-auth.json" ]] || return 0
+    _do_ide_switch "$dir"
+}
+
+cmd_ide_switch() {
+    need_jq
+    local ref="${1:?$(_t usage_ide_switch)}"
+    local dir; dir=$(require_profile "$ref")
+    [[ -f "$dir/ide-auth.json" ]] || die "$(_t err_no_ide_captured_ref "$(label "$dir")" "$ref")"
+    _do_ide_switch "$dir"
+}
+
+# switches a single resolved profile dir to "current" - CLI session (if it
+# has one), IDE session (if it has one), whichever applies. Shared by both
+# `switch <ref>` and plain rotating `switch`.
+_switch_profile() {
+    local dir="$1"
+    local type; type=$(jq -r '.type' "$dir/meta.json")
+    case "$type" in
+        api-key) die "$(_t err_apikey_no_switch "$(label "$dir")" "$(basename "$dir")")" ;;
+        ide-only)
+            echo "$(_t msg_ide_only_switch "$(label "$dir")")"
+            _maybe_switch_ide "$dir"
+            local u; u=$(usage_summary "$(_effective_access_token "$dir")" 2>/dev/null) || u=""
+            [[ -n "$u" ]] && echo "$(_t msg_usage_prefix "$u")"
+            return 0
+            ;;
+    esac
+
+    local target_email now_email
+    target_email=$(jq -r '.email' "$dir/meta.json")
+    now_email=$(current_email)
+    # trust the cache only if the Keychain token it describes still exists -
+    # if something cleared the Keychain out from under a stale cache (agent
+    # logout bypassing cursorswap, manual Keychain edits, etc.) a plain
+    # cache-email match would wrongly skip the actual restore.
+    if [[ "$now_email" == "$target_email" ]] && _has_cli_session; then
+        echo "$(_t msg_already_on "$(label "$dir")" "$target_email")"
+    else
+        _restore_session "$dir"
+        echo "$(_t msg_swapped_verifying "$(label "$dir")")"
+        agent status
+        _print_usage_line
+    fi
+    _maybe_switch_ide "$dir"
+}
+
+cmd_use() {
+    need_jq
+    local ref="${1:?$(_t usage_switch)}"
+    local dir; dir=$(require_profile "$ref")
+    _switch_profile "$dir"
+}
+
+_print_usage_line() {
+    local u; u=$(usage_summary "$(security find-generic-password -s "$SVC_ACCESS" -a "$KC_ACCOUNT" -w 2>/dev/null)" 2>/dev/null) || return 0
+    echo "$(_t msg_usage_prefix "$u")"
+}
+
+_restore_session() {
+    local dir="$1"
+    security add-generic-password -U -s "$SVC_ACCESS"  -a "$KC_ACCOUNT" -w "$(cat "$dir/access-token")"  >/dev/null
+    security add-generic-password -U -s "$SVC_REFRESH" -a "$KC_ACCOUNT" -w "$(cat "$dir/refresh-token")" >/dev/null
+    jq -s '.[0] as $cur | .[1] as $saved | $cur
+        | .authInfo = $saved.authInfo
+        | .autoReviewAvailabilityCache = $saved.autoReviewAvailabilityCache
+        | .serverConfigCache = $saved.serverConfigCache' \
+        "$CONFIG" "$dir/cli-config.json" > "$CONFIG.tmp"
+    mv "$CONFIG.tmp" "$CONFIG"
+}
+
+cmd_switch_next() {
+    need_jq
+    local dirs=() d now_email now_ide_email idx=-1 i=0
+    now_email=$(current_email)
+    now_ide_email=$(current_ide_email)
+    while IFS= read -r d; do dirs+=("$d"); done < <(
+        for m in "$STORE"/*/meta.json; do
+            [[ -f "$m" ]] || continue
+            jq -e 'select((.type=="session" or .type=="ide-only") and .enabled==true)' "$m" >/dev/null 2>&1 || continue
+            jq -r '.slot' "$m"
+        done | sort -n | while read -r s; do
+            for m in "$STORE"/*/meta.json; do
+                [[ "$(jq -r '.slot' "$m")" == "$s" ]] && dirname "$m"
+            done
+        done
+    )
+    [[ ${#dirs[@]} -gt 0 ]] || die "$(_t err_no_accounts)"
+    # prefer matching by the current CLI session; fall back to the IDE one
+    # (pure IDE-only setups have no CLI session to match at all).
+    if _has_cli_session; then
+        for i in "${!dirs[@]}"; do
+            [[ "$(jq -r '.type' "${dirs[$i]}/meta.json")" == "session" && \
+               "$(jq -r '.email' "${dirs[$i]}/meta.json")" == "$now_email" ]] && idx=$i && break
+        done
+    fi
+    if [[ "$idx" == "-1" && -n "$now_ide_email" ]]; then
+        for i in "${!dirs[@]}"; do
+            [[ "$(jq -r '.ide_email // empty' "${dirs[$i]}/meta.json")" == "$now_ide_email" ]] && idx=$i && break
+        done
+    fi
+    local next=$(( (idx + 1) % ${#dirs[@]} ))
+    _switch_profile "${dirs[$next]}"
+}
+
+cmd_list() {
+    need_jq; ensure_store
+    local now_email now_ide_email
+    now_email=$(current_email)
+    now_ide_email=$(current_ide_email)
+    local any=0
+    echo "$(_t hdr_accounts)"
+    for m in "$STORE"/*/meta.json; do
+        [[ -f "$m" ]] || continue
+        any=1
+        local dir slot email type enabled alias saved_at tag ide_email
+        dir=$(dirname "$m")
+        slot=$(jq -r '.slot' "$m"); email=$(jq -r '.email' "$m"); type=$(jq -r '.type' "$m")
+        enabled=$(jq -r '.enabled' "$m"); alias=$(jq -r '.alias // empty' "$m"); saved_at=$(jq -r '.saved_at' "$m")
+        ide_email=$(jq -r '.ide_email // empty' "$m")
+        tag=""
+        if [[ "$type" == "session" && "$email" == "$now_email" ]]; then tag=" $(_bold_accent "$(_t tag_cli_active)")"; fi
+        if [[ -n "$ide_email" && -n "$now_ide_email" && "$ide_email" == "$now_ide_email" ]]; then
+            tag="$tag $(_bold_accent "$(_t tag_ide_active)")"
+        fi
+        [[ "$enabled" == "false" ]] && tag="$tag $(_muted "$(_t tag_disabled)")"
+        [[ "$type" == "api-key" ]] && tag="$tag $(_muted "$(_t tag_apikey)")"
+        [[ "$type" == "ide-only" ]] && tag="$tag $(_muted "$(_t tag_ideonly)")"
+        # pad plain text to fixed width FIRST, color after - ANSI codes count
+        # toward printf's width and would misalign the columns otherwise.
+        local slot_str email_str
+        printf -v slot_str '%-3s' "$slot:"
+        printf -v email_str '%-28s' "$email"
+        local alias_str=""
+        [[ -n "$alias" ]] && alias_str="$(_muted "\"$alias\" ")"
+        printf '  %s %s %s%s\n' "$(_bold "$slot_str")" "$(_accent "$email_str")" "$alias_str" "$tag"
+        printf '      %s %s\n' "$(_muted "$(_t lbl_saved)")" "$(_muted "$saved_at")"
+        if [[ "$type" == "session" || "$type" == "ide-only" ]]; then
+            local u; u=$(usage_summary "$(_effective_access_token "$dir")" 2>/dev/null) || u=""
+            [[ -n "$u" ]] && printf '      %s %s\n' "$(_muted "$(_t lbl_usage)")" "$u"
+        fi
+        [[ -n "$ide_email" && "$type" != "ide-only" ]] && printf '      %s   %s\n' "$(_muted "$(_t lbl_ide)")" "$(_muted "$ide_email")"
+    done
+    [[ "$any" == "1" ]] || echo "  $(_t msg_none_saved)"
+    echo
+    _muted "$(_t note_usage_line1)"; echo
+    _muted "$(_t note_usage_line2)"; echo
+}
+
+cmd_status() { agent status; agent about; }
+
+cmd_usage() {
+    need_jq
+    local ref="${1:-}" token label_str
+    if [[ -n "$ref" ]]; then
+        local dir; dir=$(require_profile "$ref")
+        local type; type=$(jq -r '.type' "$dir/meta.json")
+        [[ "$type" == "session" || "$type" == "ide-only" ]] \
+            || die "$(_t err_no_session_or_ide "$(label "$dir")" "$type")"
+        token=$(_effective_access_token "$dir")
+        [[ -n "$token" ]] || die "$(_t err_no_token "$(label "$dir")")"
+        label_str=$(label "$dir")
+    else
+        token=$(security find-generic-password -s "$SVC_ACCESS" -a "$KC_ACCOUNT" -w 2>/dev/null)
+        if [[ -n "$token" ]]; then
+            label_str="$(_accent "$(current_email)") $(_bold_accent "$(_t tag_cli_active)")"
+        else
+            token=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';" 2>/dev/null)
+            [[ -n "$token" ]] || die "$(_t err_no_active_session)"
+            label_str="$(_accent "$(current_ide_email)") $(_bold_accent "$(_t tag_ide_active)")"
+        fi
+    fi
+    local u; u=$(usage_summary "$token") || die "$(_t err_usage_failed)"
+    echo "$label_str: $u"
+}
+
+cmd_remove() {
+    local ref="${1:?$(_t usage_remove)}"
+    local dir; dir=$(require_profile "$ref")
+    local lbl; lbl=$(label "$dir")
+    confirm "$(_t confirm_delete "$lbl")" || { echo "$(_t aborted)"; exit 1; }
+    rm -rf "$dir"
+    echo "$(_t msg_removed "$lbl")"
+}
+
+cmd_enable_disable() {
+    need_jq
+    local state="$1" ref="${2:?$(_t usage_enable_disable "$1")}"
+    local dir; dir=$(require_profile "$ref")
+    jq --argjson v "$state" '.enabled = $v' "$dir/meta.json" > "$dir/meta.json.tmp" && mv "$dir/meta.json.tmp" "$dir/meta.json"
+    if [[ "$state" == "true" ]]; then echo "$(_t msg_enabled "$(label "$dir")")"; else echo "$(_t msg_disabled "$(label "$dir")")"; fi
+}
+
+cmd_alias() {
+    need_jq
+    if [[ $# -eq 0 ]]; then
+        for m in "$STORE"/*/meta.json; do
+            [[ -f "$m" ]] || continue
+            local a; a=$(jq -r '.alias // empty' "$m")
+            [[ -n "$a" ]] && printf '  %-15s -> %s\n' "$a" "$(jq -r '.email' "$m")"
+        done
+        return
+    fi
+    local ref="$1"; local dir; dir=$(require_profile "$ref")
+    if [[ "${2:-}" == "--unset" ]]; then
+        jq '.alias = null' "$dir/meta.json" > "$dir/meta.json.tmp" && mv "$dir/meta.json.tmp" "$dir/meta.json"
+        echo "$(_t msg_unset_alias "$(basename "$dir")")"
+    else
+        local newalias="${2:?$(_t usage_alias)}"
+        jq --arg a "$newalias" '.alias = $a' "$dir/meta.json" > "$dir/meta.json.tmp" && mv "$dir/meta.json.tmp" "$dir/meta.json"
+        echo "$(_t msg_alias_set "$newalias" "$(basename "$dir")")"
+    fi
+}
+
+cmd_map() {
+    need_jq; ensure_store
+    if [[ $# -eq 0 ]]; then
+        jq -r 'to_entries[] | "  \(.value)  ->  \(.key)"' "$MAPFILE"
+        return
+    fi
+    local ref="$1" path="${2:-$PWD}"
+    local dir; dir=$(require_profile "$ref")
+    path=$(cd "$path" && pwd)
+    jq --arg p "$path" --arg n "$(basename "$dir")" '.[$p] = $n' "$MAPFILE" > "$MAPFILE.tmp" && mv "$MAPFILE.tmp" "$MAPFILE"
+    echo "$(_t msg_mapped "$path" "$(label "$dir")")"
+}
+
+cmd_unmap() {
+    need_jq; ensure_store
+    local path="${1:-$PWD}"; path=$(cd "$path" && pwd)
+    jq --arg p "$path" 'del(.[$p])' "$MAPFILE" > "$MAPFILE.tmp" && mv "$MAPFILE.tmp" "$MAPFILE"
+    echo "$(_t msg_unmapped "$path")"
+}
+
+mapped_profile_for_cwd() {
+    need_jq; ensure_store
+    local dir="$PWD"
+    while [[ "$dir" != "/" ]]; do
+        local name; name=$(jq -r --arg p "$dir" '.[$p] // empty' "$MAPFILE")
+        [[ -n "$name" ]] && { echo "$name"; return; }
+        dir=$(dirname "$dir")
+    done
+}
+
+cmd_run() {
+    local ref="${1:-}"
+    if [[ -n "$ref" && "$ref" != "--" ]]; then shift; else ref=$(mapped_profile_for_cwd) || true; [[ "${1:-}" == "--" ]] && shift; fi
+    [[ -n "$ref" ]] || die "$(_t err_no_account_no_mapping "$PWD")"
+    local dir; dir=$(require_profile "$ref")
+    local type; type=$(jq -r '.type' "$dir/meta.json")
+
+    if [[ "$type" == "api-key" ]]; then
+        exec agent --api-key "$(cat "$dir/api-key")" "$@"
+    fi
+    [[ "$type" == "session" ]] || die "$(_t err_ideonly_no_run "$(label "$dir")")"
+
+    # session type: no real per-terminal isolation exists (Keychain is
+    # OS-user-global; CURSOR_DATA_DIR was tested and does NOT scope auth).
+    # Best effort: swap in, run, swap back to whatever was active before.
+    echo "$(_t warn_run_line1 "$(label "$dir")")" >&2
+    echo "$(_t warn_run_line2)" >&2
+    echo "$(_t warn_run_line3)" >&2
+    confirm "$(_t confirm_continue)" || { echo "$(_t aborted)"; exit 1; }
+
+    local prev_email prev_dir
+    prev_email=$(current_email)
+    prev_dir=""
+    for m in "$STORE"/*/meta.json; do
+        [[ -f "$m" ]] || continue
+        [[ "$(jq -r '.email' "$m")" == "$prev_email" ]] && prev_dir=$(dirname "$m") && break
+    done
+
+    _restore_session "$dir"
+    local status=0
+    agent "$@" || status=$?
+
+    if [[ -n "$prev_dir" ]]; then
+        _restore_session "$prev_dir"
+    else
+        echo "$(_t note_prev_not_saved "$prev_email")" >&2
+    fi
+    exit $status
+}
+
+cmd_export() {
+    local path="${1:?$(_t usage_export)}"
+    ensure_store
+    tar czf "$path" -C "$STORE" .
+    chmod 600 "$path"
+    echo "$(_t msg_exported "$(ls -d "$STORE"/*/ 2>/dev/null | wc -l | tr -d '[:space:]')" "$path")"
+    echo "$(_t warn_export_plaintext)"
+}
+
+cmd_import() {
+    local path="${1:?$(_t usage_import)}"
+    ensure_store
+    [[ -f "$path" ]] || die "$(_t err_path_not_found "$path")"
+    local tmp; tmp=$(mktemp -d)
+    tar xzf "$path" -C "$tmp"
+    local d name
+    for d in "$tmp"/*/; do
+        [[ -f "$d/meta.json" ]] || continue
+        name=$(basename "$d")
+        if [[ -d "$STORE/$name" && "${FORCE:-0}" != "1" ]]; then
+            echo "$(_t msg_skip_import "$name")"
+            continue
+        fi
+        rm -rf "$STORE/$name"
+        cp -R "$d" "$STORE/$name"
+        chmod 700 "$STORE/$name"
+        chmod 600 "$STORE/$name"/*token "$STORE/$name"/api-key 2>/dev/null || true
+        echo "$(_t msg_imported "$name")"
+    done
+    rm -rf "$tmp"
+}
+
+cmd_purge() {
+    confirm "$(_t confirm_purge "$STORE")" || { echo "$(_t aborted)"; exit 1; }
+    rm -rf "$STORE"
+    echo "$(_t msg_purged "$STORE")"
+}
+
+cmd_version() { echo "cursorswap $VERSION"; }
+
+cmd_lang() {
+    echo "$(_t msg_lang_current "$CURSOR_SWAP_LANG")"
+    echo "$(_t msg_lang_howto)"
+}
+MSG_EN[msg_lang_current]="Current language: {1}"
+MSG_VI[msg_lang_current]="Ngôn ngữ hiện tại: {1}"
+MSG_EN[msg_lang_howto]="Change with: cursorswap --lang <en|vi> <command>..., or export CURSOR_SWAP_LANG=vi in your shell rc to always use it."
+MSG_VI[msg_lang_howto]="Đổi bằng: cursorswap --lang <en|vi> <lệnh>..., hoặc export CURSOR_SWAP_LANG=vi trong shell rc để dùng luôn."
+
+# repeats `list` every N seconds (default 30, floor 5 - each refresh hits the
+# undocumented usage-% endpoint once per session/ide-only profile, and we
+# have no rate-limit info for it, so this deliberately can't be set to
+# hammer it every second).
+cmd_watch() {
+    local interval="${1:-30}"
+    [[ "$interval" =~ ^[0-9]+$ ]] || interval=30
+    (( interval < 5 )) && interval=5
+    trap 'echo; exit 0' INT
+    while true; do
+        clear 2>/dev/null || true
+        echo "$(_muted "$(_t msg_watch_header "$interval")")"
+        echo
+        cmd_list
+        sleep "$interval"
+    done
+}
+MSG_EN[msg_watch_header]="cursorswap watch - refreshing every {1}s, Ctrl-C to stop"
+MSG_VI[msg_watch_header]="cursorswap watch - làm mới mỗi {1}s, Ctrl-C để dừng"
+
+# closes gaps in slot numbers (e.g. after 'remove'), keeping relative order.
+# Aliases/mappings reference profiles by directory name, not slot, so this
+# doesn't touch either - only meta.json's own .slot field.
+cmd_renumber() {
+    need_jq; ensure_store
+    local pairs=() m slot dir
+    for m in "$STORE"/*/meta.json; do
+        [[ -f "$m" ]] || continue
+        slot=$(jq -r '.slot' "$m")
+        pairs+=("$(printf '%s\t%s' "$slot" "$(dirname "$m")")")
+    done
+    [[ ${#pairs[@]} -gt 0 ]] || { echo "  $(_t msg_none_saved)"; return; }
+    local sorted; sorted=$(printf '%s\n' "${pairs[@]}" | sort -n -t $'\t' -k1,1)
+    local i=1
+    while IFS=$'\t' read -r _ dir; do
+        jq --argjson s "$i" '.slot = $s' "$dir/meta.json" > "$dir/meta.json.tmp" && mv "$dir/meta.json.tmp" "$dir/meta.json"
+        i=$((i + 1))
+    done <<<"$sorted"
+    echo "$(_t msg_renumbered "$((i - 1))")"
+}
+MSG_EN[msg_renumbered]="Renumbered {1} account(s) to contiguous slots 1..{1}."
+MSG_VI[msg_renumbered]="Đã đánh lại số slot cho {1} account, liền mạch từ 1..{1}."
+
+cmd_update() {
+    local self="$0"
+    case "$self" in
+        /*) ;;
+        *) self="$(command -v -- "$self" 2>/dev/null || echo "$PWD/$self")" ;;
+    esac
+    [[ -w "$self" ]] || die "$(_t err_not_writable "$self")"
+
+    local tmp; tmp=$(mktemp)
+    curl -fsSL "$RAW_BASE/cursorswap" -o "$tmp" || { rm -f "$tmp"; die "$(_t err_download_failed)"; }
+    chmod +x "$tmp"
+
+    if cmp -s "$tmp" "$self"; then
+        rm -f "$tmp"
+        echo "$(_t msg_already_uptodate "$VERSION")"
+        return
+    fi
+    local new_version; new_version=$(grep -m1 '^VERSION=' "$tmp" | cut -d'"' -f2 || true)
+    mv "$tmp" "$self"
+    echo "$(_t msg_updated "$VERSION" "${new_version:-unknown}")"
+}
+
+# ---- help text (bilingual) --------------------------------------------------
+# Command syntax ("cursorswap <verb> <args>") never translates; only the
+# description after it does. All descriptions align to column 39 (2-space
+# indent + padding), matching the fixed continuation-line indent below, so
+# no per-language width recalculation is needed - Vietnamese just wraps at
+# different points than English, same as any reflowed text.
+MSG_EN[desc_list]="list saved accounts (marks active)"
+MSG_VI[desc_list]="liệt kê account đã lưu (đánh dấu account active)"
+MSG_EN[desc_status]="show current login + subscription info"
+MSG_VI[desc_status]="hiện login hiện tại + thông tin subscription"
+MSG_EN[desc_usage]=$'show usage % for that account (default: active).\n                                       undocumented Cursor API, best-effort, may be empty'
+MSG_VI[desc_usage]=$'hiện % usage của account đó (mặc định: đang active).\n                                       API không document của Cursor, best-effort, có thể trống'
+MSG_EN[desc_switch_rotate]=$'rotate to the next enabled account (CLI, IDE-only,\n                                       or both - works with IDE-only setups too)'
+MSG_VI[desc_switch_rotate]=$'xoay sang account kế tiếp còn enable (CLI, chỉ-IDE,\n                                       hoặc cả 2 - dùng được cả khi chỉ có IDE)'
+MSG_EN[desc_switch_ref]=$'swap the global CLI session to that account.\n                                       also swaps the Cursor.app IDE session if this\n                                       profile ever had \x27ide-add\x27 run on it (quits +\n                                       relaunches the app, confirms first)'
+MSG_VI[desc_switch_ref]=$'đổi session CLI toàn cục sang account đó.\n                                       đổi luôn session IDE Cursor.app nếu profile này\n                                       đã từng chạy \x27ide-add\x27 (tắt app + mở lại,\n                                       hỏi xác nhận trước)'
+MSG_EN[desc_add]=$'save the currently logged-in session(s) as <name>.\n                                       captures CLI, IDE, or both - whichever is logged in\n                                       (fine if you only use one of the two)'
+MSG_VI[desc_add]=$'lưu session đang login thành <tên>.\n                                       chụp CLI, IDE, hoặc cả 2 - cái nào đang login thì lấy\n                                       (chỉ dùng 1 trong 2 cũng được)'
+MSG_EN[desc_login]="logout -> browser login -> save as <name> (CLI only)"
+MSG_VI[desc_login]="logout -> login qua browser -> lưu thành <tên> (chỉ CLI)"
+MSG_EN[desc_add_token]=$'register a Cursor API key (no browser login,\n                                       usable concurrently via \x27run\x27)'
+MSG_VI[desc_add_token]=$'đăng ký API key Cursor (không cần login browser,\n                                       dùng song song được qua \x27run\x27)'
+MSG_EN[desc_ide_add]=$'snapshot ONLY the IDE session as <name> (plain\n                                       \x27add\x27 already does this too if the IDE is logged\n                                       in - use this to (re-)capture just the IDE side)'
+MSG_VI[desc_ide_add]=$'CHỈ chụp session IDE thành <tên> (\x27add\x27 thường\n                                       cũng đã làm việc này nếu IDE đang login rồi -\n                                       dùng lệnh này để chụp lại riêng phần IDE)'
+MSG_EN[desc_ide_switch]=$'swap the Cursor.app IDE session to that account.\n                                       quits + relaunches the app (confirms first,\n                                       closes ALL open IDE windows during the swap)'
+MSG_VI[desc_ide_switch]=$'đổi session IDE Cursor.app sang account đó.\n                                       tắt app + mở lại (hỏi xác nhận trước,\n                                       đóng HẾT mọi window IDE trong lúc đổi)'
+MSG_EN[desc_remove]="delete a saved account       (alias: rm)"
+MSG_VI[desc_remove]="xoá account đã lưu            (alias: rm)"
+MSG_EN[desc_disable]="hold out of 'switch' rotation"
+MSG_VI[desc_disable]="loại khỏi vòng xoay 'switch'"
+MSG_EN[desc_enable]="return to rotation"
+MSG_VI[desc_enable]="đưa lại vào vòng xoay"
+MSG_EN[desc_run]=$'run \x27agent\x27 as that account.\n                                       api-key accounts: real per-invocation isolation.\n                                       session accounts: swaps global state, runs, swaps\n                                       back - NOT safe for concurrent terminals.'
+MSG_VI[desc_run]=$'chạy \x27agent\x27 với account đó.\n                                       account api-key: cô lập thật theo từng lần gọi.\n                                       account session: đổi state toàn cục, chạy, đổi\n                                       lại - KHÔNG an toàn khi chạy song song nhiều terminal.'
+MSG_EN[desc_run_mapped]="run using the account mapped to \$PWD"
+MSG_VI[desc_run_mapped]="chạy bằng account đã gán cho \$PWD"
+MSG_EN[desc_map]="map a directory to an account (default: \$PWD)"
+MSG_VI[desc_map]="gán 1 thư mục cho 1 account (mặc định: \$PWD)"
+MSG_EN[desc_map_list]="list directory mappings"
+MSG_VI[desc_map_list]="liệt kê các mapping thư mục"
+MSG_EN[desc_unmap]="remove a directory mapping"
+MSG_VI[desc_unmap]="gỡ 1 mapping thư mục"
+MSG_EN[desc_alias_list]="list aliases"
+MSG_VI[desc_alias_list]="liệt kê alias"
+MSG_EN[desc_export]="back up all accounts (contains secrets)"
+MSG_VI[desc_export]="backup toàn bộ account (chứa secret)"
+MSG_EN[desc_purge]="delete all cursorswap data"
+MSG_VI[desc_purge]="xoá toàn bộ dữ liệu cursorswap"
+MSG_EN[desc_update]="download latest cursorswap from GitHub and replace self"
+MSG_VI[desc_update]="tải bản cursorswap mới nhất từ GitHub, tự ghi đè"
+MSG_EN[desc_version]="print the installed version    (alias: --version, -v)"
+MSG_VI[desc_version]="in ra version đang cài          (alias: --version, -v)"
+MSG_EN[desc_watch]="repeat 'list' every N seconds (default 30, min 5)"
+MSG_VI[desc_watch]="lặp lại 'list' mỗi N giây (mặc định 30, tối thiểu 5)"
+MSG_EN[desc_renumber]="close gaps in slot numbers, keeping relative order"
+MSG_VI[desc_renumber]="đóng khoảng trống số slot, giữ nguyên thứ tự tương đối"
+MSG_EN[desc_lang]="show current language + how to change it"
+MSG_VI[desc_lang]="hiện ngôn ngữ hiện tại + cách đổi"
+
+MSG_EN[hdr_title]="cursorswap - multi-account switcher for cursor-agent CLI"
+MSG_VI[hdr_title]="cursorswap - tool đổi qua lại nhiều account cho cursor-agent CLI"
+MSG_EN[hdr_commands]="Commands:"
+MSG_VI[hdr_commands]="Các lệnh:"
+MSG_EN[hdr_flags]="Flags:"
+MSG_VI[hdr_flags]="Cờ:"
+MSG_EN[flag_yes]="skip confirmation prompts (or: export CURSOR_SWAP_YES=1 to always skip)"
+MSG_VI[flag_yes]="bỏ qua hỏi xác nhận (hoặc: export CURSOR_SWAP_YES=1 để luôn bỏ qua)"
+MSG_EN[flag_force]="with 'import': overwrite existing accounts"
+MSG_VI[flag_force]="dùng với 'import': ghi đè account đã có"
+MSG_EN[flag_lang]="override language for this run (or: export CURSOR_SWAP_LANG=vi)"
+MSG_VI[flag_lang]="đổi ngôn ngữ cho lần chạy này (hoặc: export CURSOR_SWAP_LANG=vi)"
+
+MSG_EN[help_usage_pct]=$'Usage %: \x27list\x27/\x27switch\x27/\x27usage\x27 call an undocumented Cursor backend API (the same\none the CLI\x27s own JS bundle uses) with your stored access-token. Not public, no\nstability guarantee - may silently return nothing if Cursor changes it.'
+MSG_VI[help_usage_pct]=$'% Usage: \x27list\x27/\x27switch\x27/\x27usage\x27 gọi 1 API backend không document của Cursor (chính\nAPI mà JS bundle của CLI dùng) bằng access-token đã lưu. Không public, không\ncam kết ổn định - có thể im lặng không trả về gì nếu Cursor đổi.'
+MSG_EN[help_ide_account]=$'IDE account: Cursor.app (the desktop editor) has its OWN separate login from the\nCLI - can be a different account. ide-add/ide-switch manage it independently, by\nreading/writing plaintext auth rows in the app\x27s own local sqlite db. Also an\nundocumented on-disk format, same no-stability-guarantee caveat as usage %.'
+MSG_VI[help_ide_account]=$'Account IDE: Cursor.app (bản desktop editor) có login RIÊNG, tách khỏi CLI -\ncó thể là account khác hẳn. ide-add/ide-switch quản lý độc lập, bằng cách\nđọc/ghi thẳng vào sqlite db local của app. Cũng là định dạng không\ndocument, cùng lưu ý không cam kết ổn định như % usage.'
+MSG_EN[hdr_not_implemented]="Not implemented, on purpose:"
+MSG_VI[hdr_not_implemented]="Không làm, có chủ đích:"
+MSG_EN[help_not_implemented]=$'auto (quota-based auto-switch) - the usage % above comes from an undocumented\n    endpoint; building an automated strategy on top of something that can break\n    silently is a step too far. Use \x27cursorswap watch\x27/\x27usage\x27 and switch manually.\n  tui (full-screen UI) / menubar (macOS menu-bar app) - wrong distribution model\n    for a single self-updating bash script; would need a different language,\n    runtime, and install path. A separate project, not a feature of this file.'
+MSG_VI[help_not_implemented]=$'auto (tự switch theo quota) - % usage ở trên đến từ endpoint không document;\n    xây automation trên thứ có thể gãy âm thầm là đi quá xa. Dùng\n    \x27cursorswap watch\x27/\x27usage\x27 rồi tự switch tay.\n  tui (giao diện full-screen) / menubar (app macOS riêng) - sai mô hình phân phối\n    cho 1 file bash tự update; cần ngôn ngữ, runtime, cách cài khác hẳn.\n    Sẽ là dự án riêng, không phải tính năng của file này.'
+MSG_EN[help_data]=$'Data: {1} (plaintext tokens/keys, chmod 600 - same trust model as\ncursor-agent\x27s own on-disk config)'
+MSG_VI[help_data]=$'Dữ liệu: {1} (token/key dạng plaintext, chmod 600 - cùng mức tin cậy như\nfile config của chính cursor-agent)'
+
+usage() {
+    cat <<EOF | sed -E "s/^(  cursorswap [a-zA-Z][a-zA-Z-]*)/${C_ACCENT}\\1${C_RESET}/"
+${C_BOLD}$(_t hdr_title)${C_RESET}
+
+${C_BOLD}$(_t hdr_commands)${C_RESET}
+  cursorswap list                    $(_t desc_list)
+  cursorswap status                  $(_t desc_status)
+  cursorswap usage [slot|name|...]   $(_t desc_usage)
+  cursorswap switch                  $(_t desc_switch_rotate)
+  cursorswap switch <slot|name|...>  $(_t desc_switch_ref)
+  cursorswap add <name> [--alias A]  $(_t desc_add)
+  cursorswap login <name>            $(_t desc_login)
+  cursorswap add-token <key|-> [--email E] [--alias A]
+                                       $(_t desc_add_token)
+  cursorswap ide-add <name> [--alias A]
+                                       $(_t desc_ide_add)
+  cursorswap ide-switch <slot|name|...>
+                                       $(_t desc_ide_switch)
+  cursorswap remove <slot|name|...>  $(_t desc_remove)
+  cursorswap disable <slot|name|...> $(_t desc_disable)
+  cursorswap enable <slot|name|...>  $(_t desc_enable)
+  cursorswap run <slot|name> [-- args...]
+                                       $(_t desc_run)
+  cursorswap run [-- args...]        $(_t desc_run_mapped)
+  cursorswap map <slot|name> [path]  $(_t desc_map)
+  cursorswap map                     $(_t desc_map_list)
+  cursorswap unmap [path]            $(_t desc_unmap)
+  cursorswap alias <slot|name> <short>
+  cursorswap alias <slot|name> --unset
+  cursorswap alias                   $(_t desc_alias_list)
+  cursorswap export <path.tar.gz>    $(_t desc_export)
+  cursorswap import <path.tar.gz> [--force]
+  cursorswap purge                   $(_t desc_purge)
+  cursorswap update                  $(_t desc_update)
+  cursorswap version                 $(_t desc_version)
+  cursorswap watch [seconds]         $(_t desc_watch)
+  cursorswap renumber                $(_t desc_renumber)
+  cursorswap lang                    $(_t desc_lang)
+
+${C_BOLD}$(_t hdr_flags)${C_RESET}
+  -y, --yes       $(_t flag_yes)
+  --force         $(_t flag_force)
+  -l, --lang <l>  $(_t flag_lang)
+
+${C_MUTED}$(_t help_usage_pct)${C_RESET}
+
+${C_MUTED}$(_t help_ide_account)${C_RESET}
+
+${C_BOLD}$(_t hdr_not_implemented)${C_RESET}
+  $(_t help_not_implemented)
+
+${C_MUTED}$(_t help_data "$STORE")${C_RESET}
+EOF
+}
+
+YES="${CURSOR_SWAP_YES:-0}"; FORCE=0
+args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -y|--yes) YES=1; shift ;;
+        --force) FORCE=1; shift ;;
+        -l|--lang) CURSOR_SWAP_LANG="${2:-en}"; shift 2 ;;
+        --lang=*) CURSOR_SWAP_LANG="${1#--lang=}"; shift ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+set -- "${args[@]:-}"
+
+case "${1:-}" in
+    add)         shift; cmd_add "$@" ;;
+    login)       shift; cmd_login "$@" ;;
+    add-token)   shift; cmd_add_token "$@" ;;
+    ide-add)     shift; cmd_ide_add "$@" ;;
+    ide-switch|ide-use) shift; cmd_ide_switch "$@" ;;
+    switch)      shift; if [[ $# -eq 0 ]]; then cmd_switch_next; else cmd_use "$@"; fi ;;
+    use)         shift; cmd_use "$@" ;;
+    list|ls)     cmd_list ;;
+    status|current) cmd_status ;;
+    usage)       shift; cmd_usage "$@" ;;
+    remove|rm)   shift; cmd_remove "$@" ;;
+    disable)     shift; cmd_enable_disable false "$@" ;;
+    enable)      shift; cmd_enable_disable true "$@" ;;
+    run)         shift; cmd_run "$@" ;;
+    map)         shift; cmd_map "$@" ;;
+    unmap)       shift; cmd_unmap "$@" ;;
+    alias)       shift; cmd_alias "$@" ;;
+    export)      shift; cmd_export "$@" ;;
+    import)      shift; cmd_import "$@" ;;
+    purge)       cmd_purge ;;
+    update)      cmd_update ;;
+    version|--version|-v) cmd_version ;;
+    lang)        cmd_lang ;;
+    watch)       shift; cmd_watch "$@" ;;
+    renumber)    cmd_renumber ;;
+    ""|-h|--help|help) usage ;;
+    *) die "$(_t err_unknown_command "$1")" ;;
+esac

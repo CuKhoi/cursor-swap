@@ -2,7 +2,7 @@
 
 ## Linux / Windows support (help wanted)
 
-`cursor-swap` currently only supports macOS. Not because Linux/Windows are hard to script for,
+`cursorswap` currently only supports macOS. Not because Linux/Windows are hard to script for,
 but because we don't actually know how `cursor-agent` stores credentials on those platforms.
 
 On macOS, we confirmed by inspecting the actual CLI bundle
@@ -14,7 +14,7 @@ service: cursor-access-token   account: cursor-user
 service: cursor-refresh-token  account: cursor-user
 ```
 
-`cursor-swap`'s macOS backend (`capture_session` / `_restore_session` in `cursor-swap`) reads
+`cursorswap`'s macOS backend (`capture_session` / `_restore_session` in `cursorswap`) reads
 and writes exactly those two items. That's it — no guessing involved, we read the code that
 does it.
 
@@ -48,14 +48,14 @@ Same approach, but check:
   or raw `CredEnumerate`/`CredRead` via a small P/Invoke)
 - `%APPDATA%\Cursor` / `%LOCALAPPDATA%\cursor-agent` for a plaintext fallback
 
-Note `cursor-swap` itself is a bash script — a native Windows PowerShell/cmd user would need
+Note `cursorswap` itself is a bash script — a native Windows PowerShell/cmd user would need
 Git Bash or WSL to run it as-is, or someone willing to port the command layer to PowerShell.
 We'd rather land a verified PowerShell port from someone who can actually run it than merge
 one written blind.
 
 ### Where to plug in
 
-The script funnels every credential read/write through two places in `cursor-swap`:
+The script funnels every credential read/write through two places in `cursorswap`:
 
 - `capture_session()` — reads the two Keychain items into a saved profile
 - `_restore_session()` — writes a saved profile's values back
