@@ -83,6 +83,8 @@ cursor-swap disable work            # tạm loại khỏi vòng xoay switch
 cursor-swap remove work
 cursor-swap export backup.tar.gz    # chứa token dạng plaintext - giữ kỹ
 cursor-swap import backup.tar.gz
+cursor-swap update                  # tải bản mới nhất từ GitHub, ghi đè chính nó
+cursor-swap version                 # in ra version đang cài
 ```
 
 Chạy `cursor-swap --help` để xem đủ danh sách lệnh.

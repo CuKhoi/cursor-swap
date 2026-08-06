@@ -23,9 +23,11 @@
 
 set -euo pipefail
 
+VERSION="1.1.0"
 STORE="$HOME/.cursor-accounts"
 MAPFILE="$STORE/mappings.json"
 CONFIG="$HOME/.cursor/cli-config.json"
+RAW_BASE="https://raw.githubusercontent.com/CuKhoi/cursor-switch/main"
 SVC_ACCESS="cursor-access-token"
 SVC_REFRESH="cursor-refresh-token"
 KC_ACCOUNT="cursor-user"
@@ -386,6 +388,30 @@ cmd_purge() {
     echo "Purged $STORE"
 }
 
+cmd_version() { echo "cursor-swap $VERSION"; }
+
+cmd_update() {
+    local self="$0"
+    case "$self" in
+        /*) ;;
+        *) self="$(command -v -- "$self" 2>/dev/null || echo "$PWD/$self")" ;;
+    esac
+    [[ -w "$self" ]] || die "$self not writable - re-run with sufficient permissions"
+
+    local tmp; tmp=$(mktemp)
+    curl -fsSL "$RAW_BASE/cursor-swap" -o "$tmp" || { rm -f "$tmp"; die "download failed"; }
+    chmod +x "$tmp"
+
+    if cmp -s "$tmp" "$self"; then
+        rm -f "$tmp"
+        echo "cursor-swap is already up to date ($VERSION)"
+        return
+    fi
+    local new_version; new_version=$(grep -m1 '^VERSION=' "$tmp" | cut -d'"' -f2)
+    mv "$tmp" "$self"
+    echo "Updated cursor-swap: $VERSION -> ${new_version:-unknown}"
+}
+
 usage() {
     cat <<EOF
 cursor-swap - multi-account switcher for cursor-agent CLI
@@ -418,6 +444,8 @@ Commands:
   cursor-swap export <path.tar.gz>    back up all accounts (contains secrets)
   cursor-swap import <path.tar.gz> [--force]
   cursor-swap purge                   delete all cursor-swap data
+  cursor-swap update                  download latest cursor-swap from GitHub and replace self
+  cursor-swap version                 print the installed version    (alias: --version, -v)
 
 Flags:
   -y, --yes     skip confirmation prompts
@@ -462,6 +490,8 @@ case "${1:-}" in
     export)      shift; cmd_export "$@" ;;
     import)      shift; cmd_import "$@" ;;
     purge)       cmd_purge ;;
+    update)      cmd_update ;;
+    version|--version|-v) cmd_version ;;
     ""|-h|--help|help) usage ;;
     *) die "unknown command '$1' (see: cursor-swap --help)" ;;
 esac

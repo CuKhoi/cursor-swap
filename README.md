@@ -83,6 +83,8 @@ cursor-swap disable work            # skip in rotation
 cursor-swap remove work
 cursor-swap export backup.tar.gz    # contains plaintext tokens - store securely
 cursor-swap import backup.tar.gz
+cursor-swap update                  # pull the latest cursor-swap from GitHub, replace self
+cursor-swap version                 # print the installed version
 ```
 
 Run `cursor-swap --help` for the full command list.
