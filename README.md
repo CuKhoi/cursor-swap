@@ -55,9 +55,9 @@ installed.
 ## Usage
 
 ```
-# add an account
-cursor-swap login work              # logout -> browser login -> save as "work"
-cursor-swap add personal            # snapshot the currently logged-in session as "personal"
+# add an account - log into the CLI, the IDE, or both first, then:
+cursor-swap add personal            # captures whichever is logged in (CLI, IDE, or both)
+cursor-swap login work              # logout -> browser login -> save as "work" (CLI only)
 cursor-swap add-token sk-... --email work@co.com --alias work   # API key, no browser login
 
 # list / status
@@ -79,8 +79,9 @@ cursor-swap map work
 cursor-swap run                     # auto-picks "work" from the directory mapping
 
 # Cursor.app IDE account (separate login from the CLI - see "IDE account" below)
-cursor-swap ide-add work            # snapshot the currently logged-in IDE session as "work"
-                                     # (after this, plain 'switch work' above swaps both)
+# 'add' above already captures it if the IDE was logged in - these are for re-capturing
+# or swapping just the IDE side on its own.
+cursor-swap ide-add work            # (re-)snapshot ONLY the currently logged-in IDE session
 cursor-swap ide-switch work         # swap ONLY the IDE session, leave the CLI alone
 
 # housekeeping

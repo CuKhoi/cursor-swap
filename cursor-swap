@@ -41,7 +41,7 @@
 
 set -euo pipefail
 
-VERSION="1.4.1"
+VERSION="1.5.0"
 STORE="$HOME/.cursor-accounts"
 MAPFILE="$STORE/mappings.json"
 CONFIG="$HOME/.cursor/cli-config.json"
@@ -167,6 +167,19 @@ capture_session() {
     echo "Saved '$name' ($email) as slot $slot"
 }
 
+_has_cli_session() {
+    security find-generic-password -s "$SVC_ACCESS" -a "$KC_ACCOUNT" -w >/dev/null 2>&1
+}
+
+_has_ide_session() {
+    [[ -f "$IDE_DB" ]] || return 1
+    local v; v=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';" 2>/dev/null)
+    [[ -n "$v" ]]
+}
+
+# captures whichever of CLI / Cursor.app IDE is currently logged in - either,
+# both, or (if neither) errors. Most people only use one or the other, so
+# this doesn't require both like the old always-capture-CLI version did.
 cmd_add() {
     local name="" alias=""
     while [[ $# -gt 0 ]]; do
@@ -177,7 +190,23 @@ cmd_add() {
     done
     [[ -n "$name" ]] || die "usage: cursor-swap add <name> [--alias X]"
     ensure_store
-    capture_session "$name" "$alias"
+
+    local got_cli=0 got_ide=0
+    if _has_cli_session; then
+        capture_session "$name" "$alias"
+        got_cli=1
+    else
+        echo "note: no active CLI session (agent not logged in) - skipping CLI capture"
+    fi
+    if _has_ide_session; then
+        local ide_args=("$name")
+        [[ -n "$alias" ]] && ide_args+=(--alias "$alias")
+        cmd_ide_add "${ide_args[@]}"
+        got_ide=1
+    else
+        echo "note: no active Cursor.app IDE session - skipping IDE capture"
+    fi
+    (( got_cli || got_ide )) || die "not logged in anywhere - run 'agent login' or log into the Cursor.app IDE first"
 }
 
 cmd_login() {
@@ -365,7 +394,11 @@ cmd_use() {
     local target_email now_email
     target_email=$(jq -r '.email' "$dir/meta.json")
     now_email=$(current_email)
-    if [[ "$now_email" == "$target_email" ]]; then
+    # trust the cache only if the Keychain token it describes still exists -
+    # if something cleared the Keychain out from under a stale cache (agent
+    # logout bypassing cursor-swap, manual Keychain edits, etc.) a plain
+    # cache-email match would wrongly skip the actual restore.
+    if [[ "$now_email" == "$target_email" ]] && _has_cli_session; then
         echo "Already on $(label "$dir") ($target_email)"
     else
         _restore_session "$dir"
@@ -659,14 +692,17 @@ Commands:
                                        also swaps the Cursor.app IDE session if this
                                        profile ever had 'ide-add' run on it (quits +
                                        relaunches the app, confirms first)
-  cursor-swap add <name> [--alias A]  save the currently logged-in session as <name>
-  cursor-swap login <name>            logout -> browser login -> save as <name>
+  cursor-swap add <name> [--alias A]  save the currently logged-in session(s) as <name>.
+                                       captures CLI, IDE, or both - whichever is logged in
+                                       (fine if you only use one of the two)
+  cursor-swap login <name>            logout -> browser login -> save as <name> (CLI only)
   cursor-swap add-token <key|-> [--email E] [--alias A]
                                        register a Cursor API key (no browser login,
                                        usable concurrently via 'run')
   cursor-swap ide-add <name> [--alias A]
-                                       snapshot the CURRENTLY logged-in Cursor.app IDE
-                                       session (separate login from the CLI) as <name>
+                                       snapshot ONLY the IDE session as <name> (plain
+                                       'add' already does this too if the IDE is logged
+                                       in - use this to (re-)capture just the IDE side)
   cursor-swap ide-switch <slot|name|...>
                                        swap the Cursor.app IDE session to that account.
                                        quits + relaunches the app (confirms first,
