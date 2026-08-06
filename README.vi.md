@@ -54,9 +54,9 @@ Cần có sẵn `jq` (`brew install jq`) và [`cursor-agent` CLI](https://cursor
 ## Cách dùng
 
 ```
-# thêm account
-cursor-swap login work              # logout -> login browser -> lưu thành "work"
-cursor-swap add personal            # chụp lại account đang login hiện tại, lưu thành "personal"
+# thêm account - login CLI, IDE, hoặc cả 2 trước, rồi:
+cursor-swap add personal            # chụp cái nào đang login (CLI, IDE, hoặc cả 2)
+cursor-swap login work              # logout -> login browser -> lưu thành "work" (chỉ CLI)
 cursor-swap add-token sk-... --email work@co.com --alias work   # API key, không cần login browser
 
 # xem list / status
@@ -78,8 +78,8 @@ cursor-swap map work
 cursor-swap run                     # tự chọn "work" theo mapping thư mục
 
 # account IDE Cursor.app (login riêng, tách khỏi CLI - xem phần "Account IDE" bên dưới)
-cursor-swap ide-add work            # chụp lại session IDE đang login hiện tại, lưu thành "work"
-                                     # (sau lệnh này, 'switch work' bên trên đổi luôn cả 2)
+# 'add' ở trên đã tự chụp IDE nếu đang login rồi - 2 lệnh dưới để chụp lại/đổi riêng IDE.
+cursor-swap ide-add work            # (chụp lại) CHỈ session IDE đang login hiện tại
 cursor-swap ide-switch work         # CHỈ đổi session IDE, không đụng CLI
 
 # việc vặt khác
