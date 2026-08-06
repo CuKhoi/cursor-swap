@@ -41,7 +41,7 @@
 
 set -euo pipefail
 
-VERSION="1.6.0"
+VERSION="1.6.1"
 STORE="$HOME/.cursor-accounts"
 MAPFILE="$STORE/mappings.json"
 CONFIG="$HOME/.cursor/cli-config.json"
@@ -790,10 +790,10 @@ cmd_update() {
 }
 
 usage() {
-    cat <<EOF
-cursor-swap - multi-account switcher for cursor-agent CLI
+    cat <<EOF | sed -E "s/^(  cursor-swap [a-zA-Z][a-zA-Z-]*)/${C_ACCENT}\\1${C_RESET}/"
+${C_BOLD}cursor-swap${C_RESET} - multi-account switcher for cursor-agent CLI
 
-Commands:
+${C_BOLD}Commands:${C_RESET}
   cursor-swap list                    list saved accounts (marks active)
   cursor-swap status                  show current login + subscription info
   cursor-swap usage [slot|name|...]   show usage % for that account (default: active).
@@ -840,26 +840,26 @@ Commands:
   cursor-swap update                  download latest cursor-swap from GitHub and replace self
   cursor-swap version                 print the installed version    (alias: --version, -v)
 
-Flags:
+${C_BOLD}Flags:${C_RESET}
   -y, --yes     skip confirmation prompts (or: export CURSOR_SWAP_YES=1 to always skip)
   --force       with 'import': overwrite existing accounts
 
-Usage %: 'list'/'switch'/'usage' call an undocumented Cursor backend API (the same
+${C_MUTED}Usage %: 'list'/'switch'/'usage' call an undocumented Cursor backend API (the same
 one the CLI's own JS bundle uses) with your stored access-token. Not public, no
-stability guarantee - may silently return nothing if Cursor changes it.
+stability guarantee - may silently return nothing if Cursor changes it.${C_RESET}
 
-IDE account: Cursor.app (the desktop editor) has its OWN separate login from the
+${C_MUTED}IDE account: Cursor.app (the desktop editor) has its OWN separate login from the
 CLI - can be a different account. ide-add/ide-switch manage it independently, by
 reading/writing plaintext auth rows in the app's own local sqlite db. Also an
-undocumented on-disk format, same no-stability-guarantee caveat as usage %.
+undocumented on-disk format, same no-stability-guarantee caveat as usage %.${C_RESET}
 
-Not implemented, on purpose:
+${C_BOLD}Not implemented, on purpose:${C_RESET}
   auto (quota-based auto-switch), tui/watch/menubar (dashboards) - not worth building
     automation on an undocumented endpoint that can break silently.
   slot renumbering - slots are stable ids; use aliases instead.
 
-Data: $STORE (plaintext tokens/keys, chmod 600 - same trust model as
-cursor-agent's own on-disk config)
+${C_MUTED}Data: $STORE (plaintext tokens/keys, chmod 600 - same trust model as
+cursor-agent's own on-disk config)${C_RESET}
 EOF
 }
 
