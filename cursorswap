@@ -44,6 +44,29 @@
 #          notarization. Would be a separate project, not a feature of this
 #          file.
 
+# cursorswap needs bash 4+ (associative arrays, for i18n). macOS ships bash
+# 3.2 as /bin/bash - Apple froze it there in ~2007 over GPLv3, and never
+# updated it since. `#!/usr/bin/env bash` finds whatever's first in PATH,
+# which on a stock Mac (no Homebrew bash installed) is that 3.2. Without this
+# guard the script just dies on the first `declare -A` with a cryptic
+# "declare: -A: invalid option" instead of a useful message. Written in
+# bash-3.2-safe syntax on purpose - it has to run correctly UNDER 3.2 before
+# it's decided whether to re-exec into something newer.
+if [ -z "${CURSORSWAP_REEXEC:-}" ] && [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] 2>/dev/null; then
+    for _cursorswap_candidate in /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash 2>/dev/null)"; do
+        if [ -n "$_cursorswap_candidate" ] && [ -x "$_cursorswap_candidate" ]; then
+            # shellcheck disable=SC2016  # single-quoted on purpose: evaluated by the candidate bash, not this one
+            _v=$("$_cursorswap_candidate" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null)
+            if [ -n "$_v" ] && [ "$_v" -ge 4 ] 2>/dev/null; then
+                CURSORSWAP_REEXEC=1 exec "$_cursorswap_candidate" "$0" "$@"
+            fi
+        fi
+    done
+    echo "error: cursorswap needs bash 4 or newer - this system's bash ($BASH) is $BASH_VERSION." >&2
+    echo "       Install a newer one with: brew install bash" >&2
+    exit 1
+fi
+
 set -euo pipefail
 
 VERSION="1.7.0"
@@ -309,6 +332,8 @@ MSG_VI[warn_export_plaintext]="cảnh báo: file nén này chứa token/api key 
 
 MSG_EN[usage_import]="usage: cursorswap import <path.tar.gz>"
 MSG_VI[usage_import]="cách dùng: cursorswap import <path.tar.gz>"
+MSG_EN[err_path_not_dir]="{1} is not a directory (or doesn't exist)"
+MSG_VI[err_path_not_dir]="{1} không phải thư mục (hoặc không tồn tại)"
 MSG_EN[err_path_not_found]="{1} not found"
 MSG_VI[err_path_not_found]="không thấy {1}"
 MSG_EN[msg_skip_import]="skip '{1}' (exists, use --force to overwrite)"
@@ -339,12 +364,12 @@ current_email() {
 
 current_ide_email() {
     [[ -f "$IDE_DB" ]] || return
-    local email; email=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/cachedEmail';" 2>/dev/null)
+    local email; email=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/cachedEmail';" 2>/dev/null || true)
     if [[ -z "$email" ]]; then
         # cachedEmail can lag behind a fresh login for a bit - fall back to
         # matching the token's auth0 sub against a saved CLI profile's authId.
         local sub token
-        token=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';" 2>/dev/null)
+        token=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';" 2>/dev/null || true)
         sub=$(_jwt_sub "$token")
         if [[ -n "$sub" ]]; then
             for cfg in "$STORE"/*/cli-config.json; do
@@ -431,7 +456,7 @@ _effective_access_token() {
     if [[ -n "$ide_email" ]]; then
         local now_ide; now_ide=$(current_ide_email)
         if [[ -n "$now_ide" && "$ide_email" == "$now_ide" ]]; then
-            local tok; tok=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';" 2>/dev/null)
+            local tok; tok=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';" 2>/dev/null || true)
             [[ -n "$tok" ]] && { echo "$tok"; return; }
         fi
     fi
@@ -490,7 +515,7 @@ _has_cli_session() {
 
 _has_ide_session() {
     [[ -f "$IDE_DB" ]] || return 1
-    local v; v=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';" 2>/dev/null)
+    local v; v=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';" 2>/dev/null || true)
     [[ -n "$v" ]]
 }
 
@@ -548,9 +573,15 @@ cmd_add_token() {
         esac
     done
     [[ "$token" == "-" ]] && token=$(cat)
-    local slot; slot=$(next_slot)
-    [[ -n "$email" ]] || email="api-key-${slot}@token.local"
-    local dir="$STORE/$email"
+    [[ -n "$email" ]] || email="api-key-$(next_slot)@token.local"
+    local dir="$STORE/$email" slot
+    if [[ -d "$dir" ]]; then
+        confirm "$(_t confirm_overwrite "$email" "$(jq -r '.email' "$dir/meta.json" 2>/dev/null || echo '?')")" || { echo "$(_t aborted)"; exit 1; }
+        slot=$(jq -r '.slot' "$dir/meta.json")
+        [[ -z "$alias" ]] && alias=$(jq -r '.alias // empty' "$dir/meta.json")
+    else
+        slot=$(next_slot)
+    fi
     mkdir -p "$dir"; chmod 700 "$dir"
     printf '%s' "$token" > "$dir/api-key"; chmod 600 "$dir/api-key"
     jq -n --arg email "$email" --arg ts "$(date -u +%FT%TZ)" --argjson slot "$slot" \
@@ -594,7 +625,7 @@ cmd_ide_add() {
     [[ -n "$name" ]] || die "$(_t usage_ide_add)"
     [[ -f "$IDE_DB" ]] || die "$(_t err_ide_db_not_found "$IDE_DB")"
 
-    local rows; rows=$(sqlite3 -json "$IDE_DB" "SELECT key, value FROM ItemTable WHERE key LIKE 'cursorAuth/%';" 2>/dev/null)
+    local rows; rows=$(sqlite3 -json "$IDE_DB" "SELECT key, value FROM ItemTable WHERE key LIKE 'cursorAuth/%';" 2>/dev/null || true)
     [[ -n "$rows" && "$rows" != "[]" ]] || die "$(_t err_no_ide_rows)"
     local ide_email; ide_email=$(jq -r '.[] | select(.key=="cursorAuth/cachedEmail") | .value' <<<"$rows")
     if [[ -z "$ide_email" ]]; then
@@ -849,7 +880,7 @@ cmd_usage() {
         if [[ -n "$token" ]]; then
             label_str="$(_accent "$(current_email)") $(_bold_accent "$(_t tag_cli_active)")"
         else
-            token=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';" 2>/dev/null)
+            token=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';" 2>/dev/null || true)
             [[ -n "$token" ]] || die "$(_t err_no_active_session)"
             label_str="$(_accent "$(current_ide_email)") $(_bold_accent "$(_t tag_ide_active)")"
         fi
@@ -904,14 +935,15 @@ cmd_map() {
     fi
     local ref="$1" path="${2:-$PWD}"
     local dir; dir=$(require_profile "$ref")
-    path=$(cd "$path" && pwd)
+    path=$(cd "$path" 2>/dev/null && pwd) || die "$(_t err_path_not_dir "${2:-$PWD}")"
     jq --arg p "$path" --arg n "$(basename "$dir")" '.[$p] = $n' "$MAP_FILE" > "$MAP_FILE.tmp" && mv "$MAP_FILE.tmp" "$MAP_FILE"
     echo "$(_t msg_mapped "$path" "$(label "$dir")")"
 }
 
 cmd_unmap() {
     need_jq; ensure_store
-    local path="${1:-$PWD}"; path=$(cd "$path" && pwd)
+    local path="${1:-$PWD}"
+    path=$(cd "$path" 2>/dev/null && pwd) || die "$(_t err_path_not_dir "${1:-$PWD}")"
     jq --arg p "$path" 'del(.[$p])' "$MAP_FILE" > "$MAP_FILE.tmp" && mv "$MAP_FILE.tmp" "$MAP_FILE"
     echo "$(_t msg_unmapped "$path")"
 }
@@ -928,7 +960,8 @@ mapped_profile_for_cwd() {
 
 cmd_run() {
     local ref="${1:-}"
-    if [[ -n "$ref" && "$ref" != "--" ]]; then shift; else ref=$(mapped_profile_for_cwd) || true; [[ "${1:-}" == "--" ]] && shift; fi
+    if [[ -n "$ref" && "$ref" != "--" ]]; then shift; else ref=$(mapped_profile_for_cwd) || true; fi
+    [[ "${1:-}" == "--" ]] && shift
     [[ -n "$ref" ]] || die "$(_t err_no_account_no_mapping "$PWD")"
     local dir; dir=$(require_profile "$ref")
     local type; type=$(jq -r '.type' "$dir/meta.json")
@@ -951,7 +984,9 @@ cmd_run() {
     prev_dir=""
     for m in "$STORE"/*/meta.json; do
         [[ -f "$m" ]] || continue
-        [[ "$(jq -r '.email' "$m")" == "$prev_email" ]] && prev_dir=$(dirname "$m") && break
+        if jq -e --arg e "$prev_email" 'select(.type=="session" and .email==$e)' "$m" >/dev/null 2>&1; then
+            prev_dir=$(dirname "$m"); break
+        fi
     done
 
     _restore_session "$dir"
