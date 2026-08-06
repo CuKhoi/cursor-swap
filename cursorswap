@@ -48,7 +48,7 @@ set -euo pipefail
 
 VERSION="1.7.0"
 STORE="${CURSOR_SWAP_STORE:-$HOME/.cursor-accounts}"
-MAPFILE="$STORE/mappings.json"
+MAP_FILE="$STORE/mappings.json"
 CONFIG="$HOME/.cursor/cli-config.json"
 RAW_BASE="https://raw.githubusercontent.com/CuKhoi/cursor-swap/main"
 API_BASE="https://api2.cursor.sh"
@@ -359,7 +359,7 @@ current_ide_email() {
     echo "$email"
 }
 
-ensure_store() { mkdir -p "$STORE"; chmod 700 "$STORE"; [[ -f "$MAPFILE" ]] || echo '{}' > "$MAPFILE"; }
+ensure_store() { mkdir -p "$STORE"; chmod 700 "$STORE"; [[ -f "$MAP_FILE" ]] || echo '{}' > "$MAP_FILE"; }
 
 next_slot() {
     local max=0 s
@@ -395,7 +395,11 @@ label() {
     local dir="$1" name alias
     name=$(basename "$dir")
     alias=$(jq -r '.alias // empty' "$dir/meta.json")
-    [[ -n "$alias" ]] && echo "$(_accent "$name") $(_muted "($alias)")" || _accent "$name"
+    if [[ -n "$alias" ]]; then
+        echo "$(_accent "$name") $(_muted "($alias)")"
+    else
+        _accent "$name"
+    fi
 }
 
 # any access token this profile has, CLI's or the IDE's - the usage-% API
@@ -859,7 +863,7 @@ cmd_remove() {
     local dir; dir=$(require_profile "$ref")
     local lbl; lbl=$(label "$dir")
     confirm "$(_t confirm_delete "$lbl")" || { echo "$(_t aborted)"; exit 1; }
-    rm -rf "$dir"
+    rm -rf "${dir:?}"
     echo "$(_t msg_removed "$lbl")"
 }
 
@@ -895,20 +899,20 @@ cmd_alias() {
 cmd_map() {
     need_jq; ensure_store
     if [[ $# -eq 0 ]]; then
-        jq -r 'to_entries[] | "  \(.value)  ->  \(.key)"' "$MAPFILE"
+        jq -r 'to_entries[] | "  \(.value)  ->  \(.key)"' "$MAP_FILE"
         return
     fi
     local ref="$1" path="${2:-$PWD}"
     local dir; dir=$(require_profile "$ref")
     path=$(cd "$path" && pwd)
-    jq --arg p "$path" --arg n "$(basename "$dir")" '.[$p] = $n' "$MAPFILE" > "$MAPFILE.tmp" && mv "$MAPFILE.tmp" "$MAPFILE"
+    jq --arg p "$path" --arg n "$(basename "$dir")" '.[$p] = $n' "$MAP_FILE" > "$MAP_FILE.tmp" && mv "$MAP_FILE.tmp" "$MAP_FILE"
     echo "$(_t msg_mapped "$path" "$(label "$dir")")"
 }
 
 cmd_unmap() {
     need_jq; ensure_store
     local path="${1:-$PWD}"; path=$(cd "$path" && pwd)
-    jq --arg p "$path" 'del(.[$p])' "$MAPFILE" > "$MAPFILE.tmp" && mv "$MAPFILE.tmp" "$MAPFILE"
+    jq --arg p "$path" 'del(.[$p])' "$MAP_FILE" > "$MAP_FILE.tmp" && mv "$MAP_FILE.tmp" "$MAP_FILE"
     echo "$(_t msg_unmapped "$path")"
 }
 
@@ -916,7 +920,7 @@ mapped_profile_for_cwd() {
     need_jq; ensure_store
     local dir="$PWD"
     while [[ "$dir" != "/" ]]; do
-        local name; name=$(jq -r --arg p "$dir" '.[$p] // empty' "$MAPFILE")
+        local name; name=$(jq -r --arg p "$dir" '.[$p] // empty' "$MAP_FILE")
         [[ -n "$name" ]] && { echo "$name"; return; }
         dir=$(dirname "$dir")
     done
@@ -967,7 +971,7 @@ cmd_export() {
     ensure_store
     tar czf "$path" -C "$STORE" .
     chmod 600 "$path"
-    echo "$(_t msg_exported "$(ls -d "$STORE"/*/ 2>/dev/null | wc -l | tr -d '[:space:]')" "$path")"
+    echo "$(_t msg_exported "$(find "$STORE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d '[:space:]')" "$path")"
     echo "$(_t warn_export_plaintext)"
 }
 
@@ -985,18 +989,18 @@ cmd_import() {
             echo "$(_t msg_skip_import "$name")"
             continue
         fi
-        rm -rf "$STORE/$name"
+        rm -rf "${STORE:?}/${name:?}"
         cp -R "$d" "$STORE/$name"
         chmod 700 "$STORE/$name"
         chmod 600 "$STORE/$name"/*token "$STORE/$name"/api-key 2>/dev/null || true
         echo "$(_t msg_imported "$name")"
     done
-    rm -rf "$tmp"
+    rm -rf "${tmp:?}"
 }
 
 cmd_purge() {
     confirm "$(_t confirm_purge "$STORE")" || { echo "$(_t aborted)"; exit 1; }
-    rm -rf "$STORE"
+    rm -rf "${STORE:?}"
     echo "$(_t msg_purged "$STORE")"
 }
 

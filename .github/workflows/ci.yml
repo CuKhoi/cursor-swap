@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    # macos-latest, not ubuntu: the tool itself is macOS-only (Keychain via
+    # `security`, IDE state via `sqlite3`/`osascript`) and the smoke test
+    # below exercises real commands, not just static analysis.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax check (bash -n)
+        run: |
+          for f in cursorswap cursor-swap install.sh; do
+            bash -n "$f"
+          done
+
+      - name: ShellCheck
+        run: |
+          brew install shellcheck
+          shellcheck cursorswap cursor-swap install.sh
+
+      - name: Smoke test (isolated store, no real Keychain/IDE data touched)
+        env:
+          CURSOR_SWAP_STORE: ${{ runner.temp }}/cswap-ci-store
+          CURSOR_SWAP_YES: "1"
+        run: |
+          chmod +x cursorswap cursor-swap install.sh
+
+          ./cursorswap --help >/dev/null
+          ./cursorswap version
+          CURSOR_SWAP_LANG=vi ./cursorswap --help >/dev/null
+          CURSOR_SWAP_LANG=vi ./cursorswap lang
+
+          # empty store
+          ./cursorswap list
+
+          # api-key profile round trip - doesn't touch the real Keychain/IDE
+          ./cursorswap add-token sk-ci-test --email ci@example.com --alias ci
+          ./cursorswap list | grep -q 'ci@example.com'
+          ./cursorswap alias | grep -q ci
+          # expected to fail (no usage % for api-key profiles) - capture first,
+          # don't pipe straight into grep, or pipefail catches the expected
+          # non-zero exit before grep ever gets to check the message.
+          out=$(./cursorswap usage ci 2>&1 || true)
+          echo "$out" | grep -q 'api-key'
+          ./cursorswap disable ci
+          ./cursorswap enable ci
+          ./cursorswap map ci /tmp
+          ./cursorswap map | grep -q ci
+          ./cursorswap unmap /tmp
+          ./cursorswap renumber
+          ./cursorswap export "$RUNNER_TEMP/backup.tar.gz"
+          ./cursorswap remove ci
+          ./cursorswap import "$RUNNER_TEMP/backup.tar.gz"
+          ./cursorswap list | grep -q 'ci@example.com'
+          ./cursorswap remove ci
+          ./cursorswap purge
+
+          # install.sh, into a scratch dir, from the checked-out source (not GitHub raw)
+          rm -rf "$RUNNER_TEMP/install-test"
+          ./install.sh "$RUNNER_TEMP/install-test"
+          "$RUNNER_TEMP/install-test/cursorswap" version

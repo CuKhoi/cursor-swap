@@ -1,0 +1,7 @@
+# SC2005 ("useless echo $(cmd)"): _t() (the i18n message lookup) intentionally
+# prints with no trailing newline via `printf '%s'`, since it's also used
+# inline mid-line (label(), colored tags in `list`, etc.) where a newline
+# would break the output. `echo "$(_t key)"` is the correct way to get a
+# newline-terminated full-line message from it - not a mistake to "simplify"
+# away, so this warning is a false positive for this codebase's design.
+disable=SC2005
