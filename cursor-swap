@@ -407,7 +407,7 @@ cmd_update() {
         echo "cursor-swap is already up to date ($VERSION)"
         return
     fi
-    local new_version; new_version=$(grep -m1 '^VERSION=' "$tmp" | cut -d'"' -f2)
+    local new_version; new_version=$(grep -m1 '^VERSION=' "$tmp" | cut -d'"' -f2 || true)
     mv "$tmp" "$self"
     echo "Updated cursor-swap: $VERSION -> ${new_version:-unknown}"
 }
