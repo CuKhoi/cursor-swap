@@ -41,7 +41,7 @@
 
 set -euo pipefail
 
-VERSION="1.5.2"
+VERSION="1.5.3"
 STORE="$HOME/.cursor-accounts"
 MAPFILE="$STORE/mappings.json"
 CONFIG="$HOME/.cursor/cli-config.json"
@@ -790,7 +790,7 @@ Commands:
   cursor-swap version                 print the installed version    (alias: --version, -v)
 
 Flags:
-  -y, --yes     skip confirmation prompts
+  -y, --yes     skip confirmation prompts (or: export CURSOR_SWAP_YES=1 to always skip)
   --force       with 'import': overwrite existing accounts
 
 Usage %: 'list'/'switch'/'usage' call an undocumented Cursor backend API (the same
@@ -812,7 +812,7 @@ cursor-agent's own on-disk config)
 EOF
 }
 
-YES=0; FORCE=0
+YES="${CURSOR_SWAP_YES:-0}"; FORCE=0
 args=()
 for a in "$@"; do
     case "$a" in

@@ -130,7 +130,8 @@ things and isn't involved in the IDE's login at all.
 Either way, swapping the IDE session requires the app **fully quit** first — it only reads
 auth off disk at startup, and a live process can overwrite the write anyway. cursor-swap
 quits it for you (asks to confirm — this closes every open IDE window) and relaunches it
-after.
+after. Pass `-y`/`--yes` to skip the confirmation, or `export CURSOR_SWAP_YES=1` in your
+shell rc to always skip it (for every confirmation prompt in the tool, not just this one).
 
 Same caveat as usage %: **undocumented on-disk format**, found by inspection, not from a
 spec. A Cursor update can change it; if `ide-add`/`ide-switch` starts failing, that's likely

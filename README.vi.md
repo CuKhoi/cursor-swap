@@ -128,7 +128,8 @@ khác, không liên quan gì đến login của IDE.
 Dù chạy qua đường nào, đổi session IDE cũng cần app **tắt hẳn** trước — nó chỉ đọc auth từ
 disk lúc khởi động, và process đang sống có thể ghi đè lại thứ mình vừa ghi. cursor-swap tự
 tắt app cho bạn (hỏi xác nhận trước — việc này đóng hết mọi window IDE đang mở) rồi mở lại
-sau khi xong.
+sau khi xong. Thêm `-y`/`--yes` để bỏ qua hỏi xác nhận, hoặc `export CURSOR_SWAP_YES=1`
+trong shell rc để bỏ qua luôn mọi lần (không chỉ riêng chỗ này).
 
 Cùng lưu ý như % usage: **định dạng lưu trên disk không document**, tìm ra bằng cách soi file,
 không phải từ spec chính thức. Cursor update là có thể đổi; nếu `ide-add`/`ide-switch` tự
