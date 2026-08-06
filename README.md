@@ -67,7 +67,8 @@ cursor-swap usage work              # usage % for one account (default: active)
 
 # switch the global CLI session (and the IDE session too, if you ran ide-add for it)
 cursor-swap switch work             # by name, slot number, alias, or email - prints usage % after
-cursor-swap switch                  # rotate to the next enabled session account
+cursor-swap switch                  # rotate to the next enabled account - CLI, IDE-only,
+                                     # or both; works fine if you only ever use the IDE
 
 # run one command as a given account without touching the global session
 # (only truly isolated for api-key profiles - see "Two account types" above)

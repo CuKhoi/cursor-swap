@@ -66,7 +66,8 @@ cursor-swap usage work              # % usage của 1 account (mặc định: ac
 
 # đổi session CLI toàn cục (và cả session IDE, nếu profile này đã chạy ide-add)
 cursor-swap switch work             # theo tên, số slot, alias, hoặc email - in % usage sau khi đổi
-cursor-swap switch                  # xoay vòng sang account session kế tiếp (còn enable)
+cursor-swap switch                  # xoay vòng sang account kế tiếp (còn enable) - CLI,
+                                     # IDE-only, hoặc cả 2; chỉ xài IDE cũng chạy bình thường
 
 # chạy 1 lệnh với account chỉ định, không đụng session toàn cục
 # (chỉ thật sự cô lập với profile api-key - xem phần "Hai loại account" ở trên)

@@ -41,7 +41,7 @@
 
 set -euo pipefail
 
-VERSION="1.5.0"
+VERSION="1.5.1"
 STORE="$HOME/.cursor-accounts"
 MAPFILE="$STORE/mappings.json"
 CONFIG="$HOME/.cursor/cli-config.json"
@@ -124,6 +124,17 @@ label() {
     name=$(basename "$dir")
     alias=$(jq -r '.alias // empty' "$dir/meta.json")
     [[ -n "$alias" ]] && echo "$name ($alias)" || echo "$name"
+}
+
+# any access token this profile has, CLI's or the IDE's - the usage-% API
+# doesn't care which surface a token came from, it's the same backend.
+_any_access_token() {
+    local dir="$1"
+    if [[ -f "$dir/access-token" ]]; then
+        cat "$dir/access-token" 2>/dev/null
+    elif [[ -f "$dir/ide-auth.json" ]]; then
+        jq -r '.[] | select(.key=="cursorAuth/accessToken") | .value' "$dir/ide-auth.json" 2>/dev/null
+    fi
 }
 
 # best-effort: prints "  total: N%  auto: N%  api: N%" for a given access token,
@@ -377,16 +388,19 @@ cmd_ide_switch() {
     _do_ide_switch "$dir"
 }
 
-cmd_use() {
-    need_jq
-    local ref="${1:?usage: cursor-swap switch <slot|name|alias|email>}"
-    local dir; dir=$(require_profile "$ref")
+# switches a single resolved profile dir to "current" - CLI session (if it
+# has one), IDE session (if it has one), whichever applies. Shared by both
+# `switch <ref>` and plain rotating `switch`.
+_switch_profile() {
+    local dir="$1"
     local type; type=$(jq -r '.type' "$dir/meta.json")
     case "$type" in
-        api-key) die "$(label "$dir") is an api-key profile - global switch doesn't apply. Use: cursor-swap run $ref -- ..." ;;
+        api-key) die "$(label "$dir") is an api-key profile - global switch doesn't apply. Use: cursor-swap run $(basename "$dir") -- ..." ;;
         ide-only)
             echo "$(label "$dir") has no CLI session captured - switching the IDE session only."
             _maybe_switch_ide "$dir"
+            local u; u=$(usage_summary "$(_any_access_token "$dir")" 2>/dev/null) || u=""
+            [[ -n "$u" ]] && echo "Usage: $u"
             return 0
             ;;
     esac
@@ -409,6 +423,13 @@ cmd_use() {
     _maybe_switch_ide "$dir"
 }
 
+cmd_use() {
+    need_jq
+    local ref="${1:?usage: cursor-swap switch <slot|name|alias|email>}"
+    local dir; dir=$(require_profile "$ref")
+    _switch_profile "$dir"
+}
+
 _print_usage_line() {
     local u; u=$(usage_summary "$(security find-generic-password -s "$SVC_ACCESS" -a "$KC_ACCOUNT" -w 2>/dev/null)" 2>/dev/null) || return 0
     echo "Usage: $u"
@@ -428,12 +449,13 @@ _restore_session() {
 
 cmd_switch_next() {
     need_jq
-    local dirs=() d now_email idx=-1 i=0
+    local dirs=() d now_email now_ide_email idx=-1 i=0
     now_email=$(current_email)
+    now_ide_email=$(current_ide_email)
     while IFS= read -r d; do dirs+=("$d"); done < <(
         for m in "$STORE"/*/meta.json; do
             [[ -f "$m" ]] || continue
-            jq -e 'select(.type=="session" and .enabled==true)' "$m" >/dev/null 2>&1 || continue
+            jq -e 'select((.type=="session" or .type=="ide-only") and .enabled==true)' "$m" >/dev/null 2>&1 || continue
             jq -r '.slot' "$m"
         done | sort -n | while read -r s; do
             for m in "$STORE"/*/meta.json; do
@@ -441,17 +463,22 @@ cmd_switch_next() {
             done
         done
     )
-    [[ ${#dirs[@]} -gt 0 ]] || die "no session accounts saved (see: cursor-swap add / login)"
-    for i in "${!dirs[@]}"; do
-        [[ "$(jq -r '.email' "${dirs[$i]}/meta.json")" == "$now_email" ]] && idx=$i && break
-    done
+    [[ ${#dirs[@]} -gt 0 ]] || die "no session or IDE-only accounts saved (see: cursor-swap add)"
+    # prefer matching by the current CLI session; fall back to the IDE one
+    # (pure IDE-only setups have no CLI session to match at all).
+    if _has_cli_session; then
+        for i in "${!dirs[@]}"; do
+            [[ "$(jq -r '.type' "${dirs[$i]}/meta.json")" == "session" && \
+               "$(jq -r '.email' "${dirs[$i]}/meta.json")" == "$now_email" ]] && idx=$i && break
+        done
+    fi
+    if [[ "$idx" == "-1" && -n "$now_ide_email" ]]; then
+        for i in "${!dirs[@]}"; do
+            [[ "$(jq -r '.ide_email // empty' "${dirs[$i]}/meta.json")" == "$now_ide_email" ]] && idx=$i && break
+        done
+    fi
     local next=$(( (idx + 1) % ${#dirs[@]} ))
-    local target="${dirs[$next]}"
-    _restore_session "$target"
-    echo "Swapped to $(label "$target"). Verifying:"
-    agent status
-    _print_usage_line
-    _maybe_switch_ide "$target"
+    _switch_profile "${dirs[$next]}"
 }
 
 cmd_list() {
@@ -477,8 +504,8 @@ cmd_list() {
         [[ "$type" == "ide-only" ]] && tag="$tag [ide-only, use: ide-switch]"
         printf '  %-3s %-28s %s%s\n' "$slot:" "$email" "$([ -n "$alias" ] && echo "\"$alias\" ")" "$tag"
         printf '      saved: %s\n' "$saved_at"
-        if [[ "$type" == "session" ]]; then
-            local u; u=$(usage_summary "$(cat "$dir/access-token" 2>/dev/null)" 2>/dev/null) || u=""
+        if [[ "$type" == "session" || "$type" == "ide-only" ]]; then
+            local u; u=$(usage_summary "$(_any_access_token "$dir")" 2>/dev/null) || u=""
             [[ -n "$u" ]] && printf '      usage: %s\n' "$u"
         fi
         [[ -n "$ide_email" && "$type" != "ide-only" ]] && printf '      ide:   %s\n' "$ide_email"
@@ -497,12 +524,20 @@ cmd_usage() {
     if [[ -n "$ref" ]]; then
         local dir; dir=$(require_profile "$ref")
         local type; type=$(jq -r '.type' "$dir/meta.json")
-        [[ "$type" == "session" ]] || die "$(label "$dir") has no CLI session captured (type: $type) - usage % needs one"
-        token=$(cat "$dir/access-token" 2>/dev/null) || die "no stored access-token for $(label "$dir")"
+        [[ "$type" == "session" || "$type" == "ide-only" ]] \
+            || die "$(label "$dir") has no CLI or IDE session captured (type: $type) - usage % needs one"
+        token=$(_any_access_token "$dir")
+        [[ -n "$token" ]] || die "no stored access-token for $(label "$dir")"
         label_str=$(label "$dir")
     else
-        token=$(security find-generic-password -s "$SVC_ACCESS" -a "$KC_ACCOUNT" -w 2>/dev/null) || die "no active session (see: cursor-swap switch)"
-        label_str="$(current_email) (active)"
+        token=$(security find-generic-password -s "$SVC_ACCESS" -a "$KC_ACCOUNT" -w 2>/dev/null)
+        if [[ -n "$token" ]]; then
+            label_str="$(current_email) (cli active)"
+        else
+            token=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';" 2>/dev/null)
+            [[ -n "$token" ]] || die "no active CLI or IDE session (see: cursor-swap switch)"
+            label_str="$(current_ide_email) (ide active)"
+        fi
     fi
     local u; u=$(usage_summary "$token") || die "usage lookup failed - token may be expired, or Cursor's internal API changed (undocumented, no stability guarantee)"
     echo "$label_str: $u"
@@ -687,7 +722,8 @@ Commands:
   cursor-swap status                  show current login + subscription info
   cursor-swap usage [slot|name|...]   show usage % for that account (default: active).
                                        undocumented Cursor API, best-effort, may be empty
-  cursor-swap switch                  rotate to the next enabled session account
+  cursor-swap switch                  rotate to the next enabled account (CLI, IDE-only,
+                                       or both - works with IDE-only setups too)
   cursor-swap switch <slot|name|...>  swap the global CLI session to that account.
                                        also swaps the Cursor.app IDE session if this
                                        profile ever had 'ide-add' run on it (quits +
