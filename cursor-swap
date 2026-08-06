@@ -41,7 +41,7 @@
 
 set -euo pipefail
 
-VERSION="1.4.0"
+VERSION="1.4.1"
 STORE="$HOME/.cursor-accounts"
 MAPFILE="$STORE/mappings.json"
 CONFIG="$HOME/.cursor/cli-config.json"
@@ -67,7 +67,24 @@ current_email() {
 
 current_ide_email() {
     [[ -f "$IDE_DB" ]] || return
-    sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/cachedEmail';" 2>/dev/null
+    local email; email=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/cachedEmail';" 2>/dev/null)
+    if [[ -z "$email" ]]; then
+        # cachedEmail can lag behind a fresh login for a bit - fall back to
+        # matching the token's auth0 sub against a saved CLI profile's authId.
+        local sub token
+        token=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';" 2>/dev/null)
+        sub=$(_jwt_sub "$token")
+        if [[ -n "$sub" ]]; then
+            for cfg in "$STORE"/*/cli-config.json; do
+                [[ -f "$cfg" ]] || continue
+                if [[ "$(jq -r '.authInfo.authId // empty' "$cfg" 2>/dev/null)" == "$sub" ]]; then
+                    email=$(jq -r '.authInfo.email' "$cfg")
+                    break
+                fi
+            done
+        fi
+    fi
+    echo "$email"
 }
 
 ensure_store() { mkdir -p "$STORE"; chmod 700 "$STORE"; [[ -f "$MAPFILE" ]] || echo '{}' > "$MAPFILE"; }
@@ -199,6 +216,17 @@ cmd_add_token() {
 
 _ide_running() { pgrep -x Cursor >/dev/null 2>&1; }
 
+# decodes the auth0 subject ("sub") claim out of a Cursor JWT's payload, no
+# verification (we already trust it - it's our own stored token).
+_jwt_sub() {
+    local payload; payload=$(cut -d. -f2 <<<"$1" | tr -- '-_' '+/')
+    case $(( ${#payload} % 4 )) in
+        2) payload="${payload}==" ;;
+        3) payload="${payload}=" ;;
+    esac
+    base64 -d <<<"$payload" 2>/dev/null | jq -r '.sub // empty' 2>/dev/null
+}
+
 # jq program that turns [{key,value},...] rows into REPLACE-on-conflict INSERT
 # statements (ItemTable.key is UNIQUE ON CONFLICT REPLACE, so a plain INSERT
 # acts as an upsert). Built via a quoted heredoc so the SQL quote-escaping
@@ -223,7 +251,24 @@ cmd_ide_add() {
     local rows; rows=$(sqlite3 -json "$IDE_DB" "SELECT key, value FROM ItemTable WHERE key LIKE 'cursorAuth/%';" 2>/dev/null)
     [[ -n "$rows" && "$rows" != "[]" ]] || die "no cursorAuth/* rows in Cursor.app's local db - log into the IDE first"
     local ide_email; ide_email=$(jq -r '.[] | select(.key=="cursorAuth/cachedEmail") | .value' <<<"$rows")
-    [[ -n "$ide_email" ]] || die "couldn't find a cached email for the current IDE session"
+    if [[ -z "$ide_email" ]]; then
+        # right after a fresh IDE login, cachedEmail can lag behind the tokens
+        # for a bit - fall back to matching the token's auth0 sub against a
+        # saved CLI profile's own cached authId.
+        local access_token sub
+        access_token=$(jq -r '.[] | select(.key=="cursorAuth/accessToken") | .value' <<<"$rows")
+        sub=$(_jwt_sub "$access_token")
+        if [[ -n "$sub" ]]; then
+            for cfg in "$STORE"/*/cli-config.json; do
+                [[ -f "$cfg" ]] || continue
+                if [[ "$(jq -r '.authInfo.authId // empty' "$cfg")" == "$sub" ]]; then
+                    ide_email=$(jq -r '.authInfo.email' "$cfg")
+                    break
+                fi
+            done
+        fi
+    fi
+    [[ -n "$ide_email" ]] || die "couldn't find a cached email for the current IDE session (cachedEmail not populated yet - wait a few seconds in the IDE and retry)"
 
     local dir="$STORE/$name" slot
     if [[ -d "$dir" ]]; then
