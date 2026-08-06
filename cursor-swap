@@ -41,7 +41,7 @@
 
 set -euo pipefail
 
-VERSION="1.5.1"
+VERSION="1.5.2"
 STORE="$HOME/.cursor-accounts"
 MAPFILE="$STORE/mappings.json"
 CONFIG="$HOME/.cursor/cli-config.json"
@@ -135,6 +135,31 @@ _any_access_token() {
     elif [[ -f "$dir/ide-auth.json" ]]; then
         jq -r '.[] | select(.key=="cursorAuth/accessToken") | .value' "$dir/ide-auth.json" 2>/dev/null
     fi
+}
+
+# best token to use for usage-% on this profile: if it's the CURRENTLY active
+# one (CLI or IDE), read the live token instead of the snapshot - Cursor
+# rotates access tokens over time even while a session stays logged in, so a
+# snapshot from whenever add/ide-add ran can go stale while still "active".
+# Falls back to the snapshot for anything not currently active.
+_effective_access_token() {
+    local dir="$1" type email ide_email
+    type=$(jq -r '.type' "$dir/meta.json")
+    email=$(jq -r '.email' "$dir/meta.json")
+    ide_email=$(jq -r '.ide_email // empty' "$dir/meta.json")
+
+    if [[ "$type" == "session" && "$email" == "$(current_email)" ]] && _has_cli_session; then
+        local tok; tok=$(security find-generic-password -s "$SVC_ACCESS" -a "$KC_ACCOUNT" -w 2>/dev/null)
+        [[ -n "$tok" ]] && { echo "$tok"; return; }
+    fi
+    if [[ -n "$ide_email" ]]; then
+        local now_ide; now_ide=$(current_ide_email)
+        if [[ -n "$now_ide" && "$ide_email" == "$now_ide" ]]; then
+            local tok; tok=$(sqlite3 "$IDE_DB" "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';" 2>/dev/null)
+            [[ -n "$tok" ]] && { echo "$tok"; return; }
+        fi
+    fi
+    _any_access_token "$dir"
 }
 
 # best-effort: prints "  total: N%  auto: N%  api: N%" for a given access token,
@@ -399,7 +424,7 @@ _switch_profile() {
         ide-only)
             echo "$(label "$dir") has no CLI session captured - switching the IDE session only."
             _maybe_switch_ide "$dir"
-            local u; u=$(usage_summary "$(_any_access_token "$dir")" 2>/dev/null) || u=""
+            local u; u=$(usage_summary "$(_effective_access_token "$dir")" 2>/dev/null) || u=""
             [[ -n "$u" ]] && echo "Usage: $u"
             return 0
             ;;
@@ -505,7 +530,7 @@ cmd_list() {
         printf '  %-3s %-28s %s%s\n' "$slot:" "$email" "$([ -n "$alias" ] && echo "\"$alias\" ")" "$tag"
         printf '      saved: %s\n' "$saved_at"
         if [[ "$type" == "session" || "$type" == "ide-only" ]]; then
-            local u; u=$(usage_summary "$(_any_access_token "$dir")" 2>/dev/null) || u=""
+            local u; u=$(usage_summary "$(_effective_access_token "$dir")" 2>/dev/null) || u=""
             [[ -n "$u" ]] && printf '      usage: %s\n' "$u"
         fi
         [[ -n "$ide_email" && "$type" != "ide-only" ]] && printf '      ide:   %s\n' "$ide_email"
@@ -526,7 +551,7 @@ cmd_usage() {
         local type; type=$(jq -r '.type' "$dir/meta.json")
         [[ "$type" == "session" || "$type" == "ide-only" ]] \
             || die "$(label "$dir") has no CLI or IDE session captured (type: $type) - usage % needs one"
-        token=$(_any_access_token "$dir")
+        token=$(_effective_access_token "$dir")
         [[ -n "$token" ]] || die "no stored access-token for $(label "$dir")"
         label_str=$(label "$dir")
     else
