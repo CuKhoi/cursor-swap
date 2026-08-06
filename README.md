@@ -93,6 +93,12 @@ cursor-swap export backup.tar.gz    # contains plaintext tokens - store securely
 cursor-swap import backup.tar.gz
 cursor-swap update                  # pull the latest cursor-swap from GitHub, replace self
 cursor-swap version                 # print the installed version
+cursor-swap watch                   # repeat 'list' every 30s (pass a number to change it)
+cursor-swap renumber                # close gaps in slot numbers after removals
+
+# language
+cursor-swap --lang vi list          # Vietnamese output for this one call
+export CURSOR_SWAP_LANG=vi          # ...or set it once in your shell rc
 ```
 
 Run `cursor-swap --help` for the full command list.
@@ -139,12 +145,25 @@ why — no stability guarantee.
 
 ## What this does NOT do
 
-- **No auto-switch / tui / watch / menubar.** The usage % above comes from an undocumented
-  endpoint that can change without notice — not something to build unattended automation on.
-  Use `cursor-swap usage` yourself and switch manually.
+- **No auto-switch.** The usage % above comes from an undocumented endpoint that can change
+  without notice — not something to build unattended automation on. Use `cursor-swap watch`
+  or `usage` yourself and switch manually.
+- **No tui / menubar.** Wrong distribution model for a single self-updating bash script — a
+  full-screen UI needs a different runtime (Python+Textual) and install path, a menu-bar app
+  needs its own Swift/rumps build, code signing, and notarization. Would be a separate
+  project, not a feature of this file. (`watch`, a plain terminal polling loop, fits fine in
+  bash and is implemented.)
 - **No true concurrent multi-session for browser-login accounts.** Confirmed via testing
   `CURSOR_DATA_DIR` — it does not isolate auth per process. If you need real concurrency,
   use `add-token` + `run` instead of session accounts.
+
+## Language
+
+`--lang <en|vi>` (or `CURSOR_SWAP_LANG=vi`) switches all of cursor-swap's own output —
+`list`, `switch`, errors, `--help`, everything — to Vietnamese. Command names and syntax
+never translate (`cursor-swap switch` is always `cursor-swap switch`), only the
+descriptions/messages around them. Falls back to English for anything not yet translated,
+never to a blank line.
 
 ## Colors
 

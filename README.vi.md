@@ -91,6 +91,12 @@ cursor-swap export backup.tar.gz    # chứa token dạng plaintext - giữ kỹ
 cursor-swap import backup.tar.gz
 cursor-swap update                  # tải bản mới nhất từ GitHub, ghi đè chính nó
 cursor-swap version                 # in ra version đang cài
+cursor-swap watch                   # lặp lại 'list' mỗi 30s (truyền số để đổi)
+cursor-swap renumber                # đóng khoảng trống số slot sau khi remove
+
+# ngôn ngữ
+cursor-swap --lang vi list          # output tiếng Việt cho riêng lần gọi này
+export CURSOR_SWAP_LANG=vi          # ...hoặc set 1 lần trong shell rc
 ```
 
 Chạy `cursor-swap --help` để xem đủ danh sách lệnh.
@@ -137,12 +143,23 @@ nhiên lỗi thì nhiều khả năng do đây — không có cam kết ổn đ�
 
 ## Cái này KHÔNG làm được
 
-- **Không auto-switch / tui / watch / menubar.** % usage ở trên đến từ API không document,
-  có thể đổi bất cứ lúc nào không báo trước — không đáng để xây tự động hóa không giám sát
-  trên đó. Tự chạy `cursor-swap usage` rồi switch tay.
+- **Không auto-switch.** % usage ở trên đến từ API không document, có thể đổi bất cứ lúc nào
+  không báo trước — không đáng để xây tự động hóa không giám sát trên đó. Tự chạy
+  `cursor-swap watch` hoặc `usage` rồi switch tay.
+- **Không tui / menubar.** Sai mô hình phân phối cho 1 file bash tự update — giao diện
+  full-screen cần runtime khác (Python+Textual) và cách cài khác, app menu-bar cần build
+  Swift/rumps riêng, ký code, notarize riêng. Sẽ là dự án khác, không phải tính năng của
+  file này. (`watch` — vòng lặp poll trong terminal thuần — hợp với bash nên đã làm.)
 - **Không chạy song song thật sự nhiều session-account.** Đã test `CURSOR_DATA_DIR` xác nhận
   nó không cô lập auth theo process. Cần chạy song song thật thì dùng `add-token` + `run`
   thay vì account session.
+
+## Ngôn ngữ
+
+`--lang <en|vi>` (hoặc `CURSOR_SWAP_LANG=vi`) đổi toàn bộ output của cursor-swap — `list`,
+`switch`, lỗi, `--help`, mọi thứ — sang tiếng Việt. Tên lệnh và cú pháp không bao giờ dịch
+(`cursor-swap switch` luôn là `cursor-swap switch`), chỉ mô tả/message xung quanh mới dịch.
+Chỗ nào chưa dịch thì fallback về tiếng Anh, không bao giờ ra dòng trống.
 
 ## Màu sắc
 
