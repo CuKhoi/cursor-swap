@@ -99,7 +99,28 @@ active one, falling back to the snapshot otherwise.
 `agent status`/`agent about` expose no quota info, but the CLI's own JS bundle calls a
 backend RPC, `aiserver.v1.DashboardService/GetCurrentPeriodUsage`, with the same bearer
 token this tool already has. `usage_summary()` calls it best-effort — no stability
-guarantee, and every caller treats failure as "print nothing," never a hard error.
+guarantee, and no caller treats failure as fatal (only `cursorswap usage <ref>`, where the
+lookup *is* the whole command, exits non-zero).
+
+On failure `usage_summary()` prints a short localized reason and returns 1; `_usage_field()`
+wraps it so display sites show that reason, muted, in place of the %. It used to collapse
+every failure into a silent `return 1` that rendered as a blank line, which made "session
+revoked" indistinguishable from "network blip" — the bug report that prompted this. Branches:
+no token, curl failure, HTTP 401/403, other HTTP, and 200-with-unexpected-shape.
+
+The 401/403 message says "session rejected", not "revoked", on purpose: a token that was
+never valid lands in the same bucket, so the stronger causal claim would sometimes be wrong.
+
+**Saved IDE session tokens get revoked server-side long before their JWT `exp`** — a stale
+snapshot returns HTTP 401 `{"code":"unauthenticated", ..., "error":"ERROR_NOT_LOGGED_IN"}`
+while its `exp` claim is still ~2 months out, so expiry checks won't predict it. There is no
+recovery path in the tool: the IDE's `cursorAuth/refreshToken` is *byte-identical* to its
+`cursorAuth/accessToken` (one session token stored under two keys, not a real refresh grant),
+so nothing can be exchanged for a fresh token. Only a real IDE re-login + `ide-add` fixes it.
+The currently-active profile is unaffected because `_effective_access_token()` reads the live
+Keychain/sqlite token for it. Why some snapshots get revoked and others don't is unresolved —
+it does not track capture time, and does not appear to be rotation-during-use (an active
+profile's live token was still byte-identical to its snapshot 15h after capture).
 
 ### i18n
 

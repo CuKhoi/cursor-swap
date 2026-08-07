@@ -69,7 +69,7 @@ fi
 
 set -euo pipefail
 
-VERSION="1.7.0"
+VERSION="1.7.1"
 STORE="${CURSOR_SWAP_STORE:-$HOME/.cursor-accounts}"
 MAP_FILE="$STORE/mappings.json"
 CONFIG="$HOME/.cursor/cli-config.json"
@@ -268,10 +268,25 @@ MSG_EN[lbl_ide]="ide:"
 MSG_VI[lbl_ide]="ide:"
 MSG_EN[msg_none_saved]="(none - use: cursorswap add <name> / login <name> / add-token <key>)"
 MSG_VI[msg_none_saved]="(chưa có gì - dùng: cursorswap add <tên> / login <tên> / add-token <key>)"
-MSG_EN[note_usage_line1]="Note: usage % is from an undocumented Cursor API (best-effort, may show nothing"
-MSG_VI[note_usage_line1]="Lưu ý: % usage lấy từ API không document của Cursor (best-effort, có thể không hiện gì"
-MSG_EN[note_usage_line2]="      if a saved token expired - switch to that account to refresh it)."
-MSG_VI[note_usage_line2]="      nếu token lưu đã hết hạn - switch sang account đó để làm mới)."
+MSG_EN[note_usage_line1]="Note: usage % is from an undocumented Cursor API (best-effort - a reason is"
+MSG_VI[note_usage_line1]="Lưu ý: % usage lấy từ API không document của Cursor (best-effort - nếu tra"
+MSG_EN[note_usage_line2]="      shown in place of the % when the lookup fails)."
+MSG_VI[note_usage_line2]="      thất bại thì hiện lý do thay cho %)."
+
+# shown in place of the usage % when the lookup fails, so a revoked session is
+# distinguishable from a network blip - both used to print an empty line.
+MSG_EN[usage_err_no_token]="(no saved access token)"
+MSG_VI[usage_err_no_token]="(chưa có access token lưu sẵn)"
+MSG_EN[usage_err_network]="(lookup failed - network error or timeout)"
+MSG_VI[usage_err_network]="(tra thất bại - lỗi mạng hoặc timeout)"
+# deliberately "rejected", not "revoked": a 401 here also covers a token that was
+# never valid, so the stronger causal claim would sometimes be wrong.
+MSG_EN[usage_err_revoked]="(session rejected - log in to that account again, then re-run add / ide-add)"
+MSG_VI[usage_err_revoked]="(session bị từ chối - đăng nhập lại account đó rồi chạy lại add / ide-add)"
+MSG_EN[usage_err_http]="(lookup failed - Cursor API returned HTTP {1})"
+MSG_VI[usage_err_http]="(tra thất bại - API Cursor trả về HTTP {1})"
+MSG_EN[usage_err_shape]="(lookup failed - unexpected API response, Cursor's internal API may have changed)"
+MSG_VI[usage_err_shape]="(tra thất bại - response lạ, API nội bộ của Cursor có thể đã đổi)"
 
 MSG_EN[err_no_session_or_ide]="{1} has no CLI or IDE session captured (type: {2}) - usage % needs one"
 MSG_VI[err_no_session_or_ide]="{1} chưa chụp session CLI hay IDE nào (type: {2}) - usage % cần có 1 trong 2"
@@ -279,8 +294,8 @@ MSG_EN[err_no_token]="no stored access-token for {1}"
 MSG_VI[err_no_token]="không có access-token lưu sẵn cho {1}"
 MSG_EN[err_no_active_session]="no active CLI or IDE session (see: cursorswap switch)"
 MSG_VI[err_no_active_session]="chưa có session CLI hay IDE nào đang active (xem: cursorswap switch)"
-MSG_EN[err_usage_failed]="usage lookup failed - token may be expired, or Cursor's internal API changed (undocumented, no stability guarantee)"
-MSG_VI[err_usage_failed]="tra usage thất bại - token có thể hết hạn, hoặc API nội bộ của Cursor đã đổi (không document, không cam kết ổn định)"
+MSG_EN[err_usage_failed]="usage lookup failed {1}"
+MSG_VI[err_usage_failed]="tra usage thất bại {1}"
 
 MSG_EN[usage_remove]="usage: cursorswap remove <slot|name|alias|email>"
 MSG_VI[usage_remove]="cách dùng: cursorswap remove <slot|tên|alias|email>"
@@ -463,22 +478,50 @@ _effective_access_token() {
     _any_access_token "$dir"
 }
 
-# best-effort: prints "  total: N%  auto: N%  api: N%" for a given access token,
-# or nothing + non-zero exit on any failure (expired token, network, API shape changed).
+# best-effort: on success prints "  total: N%  auto: N%  api: N%" for a given
+# access token and exits 0. On failure prints a short human reason and exits 1 -
+# callers show that reason in place of the %, so "session revoked, go log in
+# again" is distinguishable from a network blip. It used to collapse every
+# failure into a silent `return 1`, which rendered as an empty line and left
+# users with no idea why a profile showed no usage.
+#
+# Saved IDE session tokens in particular come back HTTP 401
+# (code "unauthenticated" / ERROR_NOT_LOGGED_IN) long before their JWT `exp`,
+# because Cursor revokes them server-side; there is no recovery path here since
+# the IDE's cursorAuth/refreshToken is byte-identical to its accessToken (it is
+# one session token stored twice, not a real refresh grant).
 usage_summary() {
-    local token="$1" resp
-    [[ -n "$token" ]] || return 1
-    resp=$(curl -sS --max-time 4 -X POST "$API_BASE/aiserver.v1.DashboardService/GetCurrentPeriodUsage" \
+    local token="$1" resp code body
+    [[ -n "$token" ]] || { _t usage_err_no_token; return 1; }
+    # -w appends the status on its own last line, so a failing request still
+    # tells us *how* it failed rather than just "non-2xx happened somewhere".
+    resp=$(curl -sS --max-time 4 -w $'\n%{http_code}' -X POST "$API_BASE/aiserver.v1.DashboardService/GetCurrentPeriodUsage" \
         -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
-        -H "Connect-Protocol-Version: 1" -d '{}' 2>/dev/null) || return 1
-    jq -e '.planUsage.totalPercentUsed' <<<"$resp" >/dev/null 2>&1 || return 1
+        -H "Connect-Protocol-Version: 1" -d '{}' 2>/dev/null) || { _t usage_err_network; return 1; }
+    code="${resp##*$'\n'}"
+    body="${resp%$'\n'*}"
+    case "$code" in
+        200) ;;
+        401|403) _t usage_err_revoked; return 1 ;;
+        *) _t usage_err_http "$code"; return 1 ;;
+    esac
+    jq -e '.planUsage.totalPercentUsed' <<<"$body" >/dev/null 2>&1 || { _t usage_err_shape; return 1; }
     local total auto api
     read -r total auto api < <(jq -r 'def r1: (.*10|round)/10;
-        .planUsage | "\((.totalPercentUsed // 0)|r1) \((.autoPercentUsed // 0)|r1) \((.apiPercentUsed // 0)|r1)"' <<<"$resp")
+        .planUsage | "\((.totalPercentUsed // 0)|r1) \((.autoPercentUsed // 0)|r1) \((.apiPercentUsed // 0)|r1)"' <<<"$body")
     printf '%s %s  %s %s  %s %s' \
         "$(_muted total:)" "$(_sev_pct "$total")" \
         "$(_muted auto:)"  "$(_sev_pct "$auto")" \
         "$(_muted api:)"   "$(_sev_pct "$api")"
+}
+
+# renders the usage field for display: the coloured % on success, the muted
+# failure reason otherwise. Never non-zero - usage % is always best-effort and
+# must not abort a switch or a listing.
+_usage_field() {
+    local out rc=0
+    out=$(usage_summary "$1") || rc=$?
+    if (( rc == 0 )); then printf '%s' "$out"; else _muted "$out"; fi
 }
 
 # ---- capture a live session account into a profile dir ----
@@ -736,8 +779,7 @@ _switch_profile() {
         ide-only)
             echo "$(_t msg_ide_only_switch "$(label "$dir")")"
             _maybe_switch_ide "$dir"
-            local u; u=$(usage_summary "$(_effective_access_token "$dir")" 2>/dev/null) || u=""
-            [[ -n "$u" ]] && echo "$(_t msg_usage_prefix "$u")"
+            echo "$(_t msg_usage_prefix "$(_usage_field "$(_effective_access_token "$dir")")")"
             return 0
             ;;
     esac
@@ -768,8 +810,8 @@ cmd_use() {
 }
 
 _print_usage_line() {
-    local u; u=$(usage_summary "$(security find-generic-password -s "$SVC_ACCESS" -a "$KC_ACCOUNT" -w 2>/dev/null)" 2>/dev/null) || return 0
-    echo "$(_t msg_usage_prefix "$u")"
+    local tok; tok=$(security find-generic-password -s "$SVC_ACCESS" -a "$KC_ACCOUNT" -w 2>/dev/null) || tok=""
+    echo "$(_t msg_usage_prefix "$(_usage_field "$tok")")"
 }
 
 _restore_session() {
@@ -851,8 +893,8 @@ cmd_list() {
         printf '  %s %s %s%s\n' "$(_bold "$slot_str")" "$(_accent "$email_str")" "$alias_str" "$tag"
         printf '      %s %s\n' "$(_muted "$(_t lbl_saved)")" "$(_muted "$saved_at")"
         if [[ "$type" == "session" || "$type" == "ide-only" ]]; then
-            local u; u=$(usage_summary "$(_effective_access_token "$dir")" 2>/dev/null) || u=""
-            [[ -n "$u" ]] && printf '      %s %s\n' "$(_muted "$(_t lbl_usage)")" "$u"
+            printf '      %s %s\n' "$(_muted "$(_t lbl_usage)")" \
+                "$(_usage_field "$(_effective_access_token "$dir")")"
         fi
         [[ -n "$ide_email" && "$type" != "ide-only" ]] && printf '      %s   %s\n' "$(_muted "$(_t lbl_ide)")" "$(_muted "$ide_email")"
     done
@@ -885,7 +927,9 @@ cmd_usage() {
             label_str="$(_accent "$(current_ide_email)") $(_bold_accent "$(_t tag_ide_active)")"
         fi
     fi
-    local u; u=$(usage_summary "$token") || die "$(_t err_usage_failed)"
+    local u rc=0
+    u=$(usage_summary "$token") || rc=$?
+    (( rc == 0 )) || die "$(_t err_usage_failed "$u")"
     echo "$label_str: $u"
 }
 
