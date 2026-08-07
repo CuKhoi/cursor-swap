@@ -42,7 +42,8 @@ macOS-only and the smoke test exercises real commands, not just static analysis.
 
 ### Three files, one is a compatibility shim
 
-- `cursorswap` — the actual tool (~1300 lines). Everything below is about this file.
+- `cursorswap` — the actual tool (~1300 lines, grows over time — check `wc -l` rather than
+  trusting this number). Everything below is about this file.
 - `cursor-swap` (no `w`, has the hyphen) — the tool's old name before a rename. Kept
   forever as a tiny forwarding shim, **not** because it's still in use: an existing user's
   installed `cursor-swap` runs its own `update` command, which fetches this exact path from
@@ -122,16 +123,25 @@ In `cmd_list`'s fixed-width columns, plain text is padded via `printf '%-Ns'` **
 being wrapped in color — ANSI escape codes count toward printf's field width and would
 misalign the table otherwise.
 
-### `set -e` footguns already hit twice — watch for the pattern
+### `set -e` footguns — this exact bug class has bitten the script repeatedly
 
-This script has been bitten multiple times by constructs that die silently under
-`set -euo pipefail` instead of hitting the intended error handling: a bare `((x++))` when
-`x` is 0 (post-increment evaluates to the old value, which is falsy), and a bare
-`var=$(cmd1 | cmd2)` where `cmd1`/`cmd2` failing (locked file, no match) kills the whole
-script instead of falling through to a `die()`/empty-check a few lines down. Any new
-`sqlite3`/`grep`/`jq` call assigned to a variable outside an `if`/`while`/`&&` context should
-get a `|| true` (or equivalent) if a plausible failure should degrade gracefully rather than
-end the process.
+Every one of these died silently under `set -euo pipefail` instead of hitting the intended
+error handling: a bare `((x++))` when `x` is 0 (post-increment evaluates to the old value,
+which is falsy); a `grep | cut` piped into a bare command substitution; and six separate
+`var=$(sqlite3 ... 2>/dev/null)` calls that would kill the whole script if sqlite3 ever
+failed for a reason other than "file missing" (locked, corrupted). Any new
+`sqlite3`/`grep`/`jq` call assigned to a variable outside an `if`/`while`/`&&` context needs
+a `|| true` (or equivalent) if a plausible failure should degrade gracefully rather than end
+the process — check for this pattern specifically before adding new state-reading code.
+
+### CI can sit "queued" for a long time — that's not a script problem
+
+GitHub's hosted macOS runners (`macos-latest`) have had real queue congestion on this repo —
+a `workflow_dispatch` run once sat queued for ~1 hour and failed with "the job was not
+acquired by Runner... after multiple attempts." That's GitHub-side capacity, not something
+to debug in the workflow file. Trust a clean local `bash -n` + `shellcheck` + manual smoke
+test (the exact commands in `.github/workflows/ci.yml`'s smoke-test step) over waiting on a
+stuck run.
 
 ### Dispatch
 
