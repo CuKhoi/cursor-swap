@@ -21,6 +21,11 @@ Cùng 1 lệnh để cài, để update, và để thay bản `cursorswap` Bash 
 `uv tool install --force git+https://github.com/CuKhoi/cursor-swap` (chạy tay cũng được).
 uv tự lo Python 3.12+; không cần gì thêm. Chỉ chạy trên macOS.
 
+Sau khi cài, cursorswap kiểm tra GitHub tối đa 1 lần/ngày và in thông báo khi có bản mới;
+lúc đó chạy `cursorswap update` để cài lại từ GitHub main. Tắt kiểm tra bằng
+`CURSOR_SWAP_NO_UPDATE_CHECK=1`. (Bản trước 3.1 chưa có thông báo - chạy lệnh một dòng ở
+trên 1 lần.)
+
 ## Bắt đầu nhanh
 
 ```sh

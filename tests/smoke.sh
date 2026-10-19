@@ -7,7 +7,7 @@ command=("$@")
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/cursorswap-smoke.XXXXXX")
 export CURSOR_SWAP_STORE="$scratch/store"
 export CURSOR_SWAP_IDE_DB="$scratch/state.vscdb"
-export CURSOR_SWAP_YES=1 CURSOR_SWAP_LANG=en NO_COLOR=1
+export CURSOR_SWAP_YES=1 CURSOR_SWAP_LANG=en NO_COLOR=1 CURSOR_SWAP_NO_UPDATE_CHECK=1
 # Keep uv's cache outside the fake HOME, but isolate all Cursor configuration.
 export UV_CACHE_DIR="${UV_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/uv}"
 export HOME="$scratch/home"

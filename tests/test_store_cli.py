@@ -104,7 +104,7 @@ def test_help(command, capsys):
     output = capsys.readouterr().out
     assert "Cursor IDE" in output
     assert "cursorswap logout-local" in output
-    assert "uv tool upgrade cursorswap" in output
+    assert "cursorswap update" in output
     assert "archive/cli-support" in output
     assert "{t:" not in output
     assert "add-token" not in output
@@ -150,10 +150,10 @@ def test_confirmation(monkeypatch, capsys):
 def test_update(monkeypatch, isolated, capsys):
     monkeypatch.setattr(cli.shutil, "which", lambda name: "/fake/uv")
     assert invoke("update") == 0
-    assert isolated["calls"][-1] == ["uv", "tool", "upgrade", "cursorswap"]
+    assert isolated["calls"][-1] == ["uv", "tool", "install", "--force", "--python", "3.12", cli.REPO]
     monkeypatch.setattr(cli.shutil, "which", lambda name: None)
     assert invoke("update") == 0
-    assert "uv tool upgrade cursorswap" in capsys.readouterr().out
+    assert "install.sh | bash" in capsys.readouterr().out
 
 
 def test_watch(monkeypatch, capsys, isolated):

@@ -18,6 +18,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("CURSOR_SWAP_YES", "1")
     monkeypatch.setenv("CURSOR_SWAP_LANG", "en")
     monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("CURSOR_SWAP_NO_UPDATE_CHECK", "1")
     monkeypatch.delenv("FORCE_COLOR", raising=False)
     monkeypatch.setattr(i18n, "LANG", "en")
     monkeypatch.chdir(tmp_path)

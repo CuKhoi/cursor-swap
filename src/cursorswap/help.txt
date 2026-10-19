@@ -16,7 +16,7 @@
   cursorswap export <path.tar.gz>    {t:desc_export}
   cursorswap import <path.tar.gz> [--force]
   cursorswap purge                   {t:desc_purge}
-  cursorswap update                  {t:desc_update_python}
+  cursorswap update                  {t:desc_update_ide}
   cursorswap version                 {t:desc_version}
   cursorswap watch [seconds]         {t:desc_watch}
   cursorswap renumber                {t:desc_renumber}

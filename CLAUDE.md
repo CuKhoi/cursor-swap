@@ -51,7 +51,11 @@ quitting a really-running Cursor.app. A prior session deleted a real saved profi
 - `usage.py` — usage % RPC; `effective_access_token()` prefers the live token when the
   profile is the account Cursor.app is signed into.
 - `i18n.py`, `colors.py`, `help.txt` — EN/VI catalogs, ANSI palette, help template.
-- `__init__.py` — version (single source of truth).
+- `__init__.py` — version (single source of truth). **Bump it on every user-facing
+  change pushed to main**: `update_check.py` compares it with the `__version__` in
+  GitHub main's `__init__.py` (cached once a day in `~/.cache/cursorswap/`, 2s timeout,
+  silent on failure, stderr-tty only, off with `CURSOR_SWAP_NO_UPDATE_CHECK=1`) to tell
+  users to run `cursorswap update` (= `uv tool install --force` from `git+` main).
 
 ### The IDE session (undocumented)
 

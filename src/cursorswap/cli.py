@@ -13,7 +13,7 @@ import tarfile
 import tempfile
 import time
 
-from . import __version__, colors, i18n, ide, usage
+from . import __version__, colors, i18n, ide, update_check, usage
 from .i18n import t
 from .store import Error, Store, label, read_json, write_json
 
@@ -243,9 +243,11 @@ class CLI:
 
     def cmd_update(self, args):
         if shutil.which("uv"):
-            ide.command(["uv", "tool", "upgrade", "cursorswap"], check=True)
+            # Same as install.sh: reinstall from GitHub main (a plain `uv tool upgrade`
+            # can keep a cached git commit).
+            ide.command(["uv", "tool", "install", "--force", "--python", "3.12", REPO], check=True)
         else:
-            print(t("msg_update_uv"))
+            print(t("msg_update_no_uv"))
 
     def cmd_help(self, args):
         template = Path(__file__).with_name("help.txt").read_text()
@@ -260,6 +262,7 @@ class CLI:
         print(text, end="")
 
 
+REPO = "git+https://github.com/CuKhoi/cursor-swap"
 ALIASES = {"ide-add": "add", "ide-switch": "switch", "ide-use": "switch", "use": "switch",
            "ide-logout-local": "logout-local", "ls": "list", "rm": "remove",
            "--version": "version", "-v": "version", "-h": "help", "--help": "help", "": "help"}
@@ -294,9 +297,11 @@ def main(argv=None):
         if command not in COMMANDS:
             raise Error(t("err_unknown_command", command))
         if command in ("enable", "disable"):
-            cli.cmd_enable_disable(args, command == "enable")
-            return 0
-        return getattr(cli, "cmd_" + command.replace("-", "_"))(args) or 0
+            status = cli.cmd_enable_disable(args, command == "enable")
+        else:
+            status = getattr(cli, "cmd_" + command.replace("-", "_"))(args)
+        update_check.notify(command)
+        return status or 0
     except (Error, OSError, ValueError, tarfile.TarError, sqlite3.Error) as exc:
         print(colors.paint(t("err_prefix") + str(exc), "red"), file=sys.stderr)
         return 1

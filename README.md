@@ -21,6 +21,11 @@ The same one-liner installs, updates, and replaces an old Bash `cursorswap`. It 
 `uv tool install --force git+https://github.com/CuKhoi/cursor-swap` (you can run that by
 hand too). uv provisions Python 3.12+; there are no other dependencies. macOS only.
 
+Once installed, cursorswap checks GitHub at most once a day and prints a notice when a newer
+version exists; `cursorswap update` then reinstalls from GitHub main. Turn the check off
+with `CURSOR_SWAP_NO_UPDATE_CHECK=1`. (Versions before 3.1 have no notice - run the
+one-liner above once.)
+
 ## Quick start
 
 ```sh

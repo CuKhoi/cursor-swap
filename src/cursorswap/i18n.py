@@ -322,6 +322,9 @@ MSG_EN.update({
     "err_no_accounts_ide": "no IDE accounts saved (see: cursorswap add)",
     "err_no_active_ide": "Cursor.app IDE isn't logged in (see: cursorswap switch)",
     "err_archived_command": "'{1}' was a cursor-agent CLI feature - CLI support is archived for now (branch archive/cli-support); this version handles the Cursor IDE only",
+    "msg_update_no_uv": "uv not found - update with: curl -fsSL https://raw.githubusercontent.com/CuKhoi/cursor-swap/main/install.sh | bash",
+    "msg_update_available": "cursorswap {1} is available (you have {2}) - run: cursorswap update",
+    "desc_update_ide": "update to the latest version from GitHub",
     "msg_none_saved_ide": "(none - log into Cursor.app, then: cursorswap add <name>)",
     "usage_err_rejected_ide": "(session rejected - log in to that account again in Cursor.app, then re-run add)",
 })
@@ -339,6 +342,9 @@ MSG_VI.update({
     "err_no_accounts_ide": "chưa lưu account IDE nào (xem: cursorswap add)",
     "err_no_active_ide": "IDE Cursor.app chưa login (xem: cursorswap switch)",
     "err_archived_command": "'{1}' là tính năng của cursor-agent CLI - phần CLI tạm archive (branch archive/cli-support); bản này chỉ hỗ trợ Cursor IDE",
+    "msg_update_no_uv": "không thấy uv - cập nhật bằng: curl -fsSL https://raw.githubusercontent.com/CuKhoi/cursor-swap/main/install.sh | bash",
+    "msg_update_available": "đã có cursorswap {1} (bạn đang dùng {2}) - chạy: cursorswap update",
+    "desc_update_ide": "cập nhật lên bản mới nhất từ GitHub",
     "msg_none_saved_ide": "(chưa có gì - login Cursor.app, rồi: cursorswap add <tên>)",
     "usage_err_rejected_ide": "(session bị từ chối - login lại account đó trong Cursor.app rồi chạy lại add)",
 })
