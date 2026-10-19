@@ -82,6 +82,13 @@ service: `_performAccessTokenRefresh` / `logout` / `revokeCursorSession`):
   `replace_auth_rows([])`, relaunch — the IDE starts signed out without calling the server.
   It confirms first if the live session isn't saved in any profile.
 
+Chat/composer/agent history lives in other tables of the same db (`cursorDiskKV`:
+`composerData`, `bubbleId`, `agentKv`, ...; `composerHeaders`) and is never touched —
+`test_switch_and_logout_leave_chats_and_workspace_state_alone` guards this; README promises
+it. The app is quit gracefully (`osascript quit`), so VS Code's default hot exit and window
+restore keep unsaved files and open windows; a save prompt makes the quit time out and the
+switch abort before anything is written.
+
 `replace_auth_rows()` deletes every `cursorAuth/*` row except the BYOK provider keys
 (`ide.BYOK_KEYS`) and inserts the snapshot in one `BEGIN IMMEDIATE` transaction (parameterized
 queries), retrying 5x on "database is locked" — a helper process can hold the lock briefly
