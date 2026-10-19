@@ -38,22 +38,34 @@ Keychain), `ide-add`/`ide-switch` cho session IDE Cursor.app (dựa sqlite, xem 
 
 ## Cài đặt
 
-```
+```sh
 curl -fsSL https://raw.githubusercontent.com/CuKhoi/cursor-swap/main/install.sh | bash
 ```
 
-Cài vào `~/.local/bin/cursorswap`. Muốn cài chỗ khác thì truyền thêm arg:
-`curl -fsSL .../install.sh | bash -s -- /usr/local/bin`.
+Cùng 1 lệnh này để cài, để update, và để chuyển từ bản Bash cũ (nó ghi đè
+`~/.local/bin/cursorswap`). Lệnh tự cài [uv](https://docs.astral.sh/uv/) nếu chưa có, rồi
+chạy `uv tool install --force git+https://github.com/CuKhoi/cursor-swap` (chạy tay cũng
+được). uv tự lo Python 3.12+; không có dependency Python lúc chạy, không cần `jq` hay
+Bash mới. Cài [`cursor-agent` CLI](https://cursor.com/cli) nếu dùng login/session CLI;
+nếu chỉ dùng IDE thì chỉ cần Cursor.app. Chỉ chạy trên macOS.
 
-Hoặc clone về chạy local:
+Profile vẫn nằm ở `~/.cursor-accounts` (hoặc `CURSOR_SWAP_STORE`), không cần chuyển đổi
+dữ liệu. Cả hai bản đọc cùng định dạng. `cursorswap update` nay chạy
+`uv tool upgrade cursorswap`.
 
-```
-git clone git@github.com:CuKhoi/cursor-swap.git
+Chạy từ source:
+
+```sh
+git clone https://github.com/CuKhoi/cursor-swap
 cd cursor-swap
-./install.sh
+uv sync
+uv run pytest
+uv run cursorswap --help
 ```
 
-Cần có sẵn `jq` (`brew install jq`) và [`cursor-agent` CLI](https://cursor.com/cli).
+File Bash `cursorswap` vẫn giữ trong repo để lệnh `update` của các bản cũ tiếp tục chạy
+(giờ nó in thêm cách chuyển sang bản Python). `cursor-swap` là shim tương thích; dùng
+`cursorswap`.
 
 ## Cách dùng
 
@@ -93,7 +105,7 @@ cursorswap disable work            # tạm loại khỏi vòng xoay switch
 cursorswap remove work
 cursorswap export backup.tar.gz    # chứa token dạng plaintext - giữ kỹ
 cursorswap import backup.tar.gz
-cursorswap update                  # tải bản mới nhất từ GitHub, ghi đè chính nó
+cursorswap update                  # uv tool upgrade cursorswap
 cursorswap version                 # in ra version đang cài
 cursorswap watch                   # lặp lại 'list' mỗi 30s (truyền số để đổi)
 cursorswap renumber                # đóng khoảng trống số slot sau khi remove
@@ -114,9 +126,10 @@ và `usage` gọi API này kiểu best-effort, in ra % `total / auto / api` đã
 
 Đây **không phải API public/có document của Cursor** — tìm ra bằng cách đọc JS minified của
 CLI, không phải từ spec chính thức. Không có cam kết ổn định gì cả; Cursor update là có thể
-gãy âm thầm, lúc đó mấy lệnh này chỉ đơn giản không hiện gì (không bao giờ crash vì lý do
-này). % usage của 1 profile đã lưu nhưng đang không active phụ thuộc vào access-token đã chụp
-của profile đó còn hạn hay không — nếu hết hạn, `switch` sang account đó 1 lần để refresh lại.
+gãy âm thầm. Khi tra thất bại, `list`/`switch` hiện lý do thay cho %, còn `usage` thoát
+với mã lỗi. Profile đang active dùng token live. Snapshot không active có thể bị từ chối
+trước cả hạn JWT; switch không sửa được token đã bị thu hồi. Khi đó cần login lại rồi
+chạy `add` / `ide-add`.
 
 ## Account IDE (định dạng lưu không document)
 
@@ -141,6 +154,11 @@ tắt app cho bạn (hỏi xác nhận trước — việc này đóng hết m�
 sau khi xong. Thêm `-y`/`--yes` để bỏ qua hỏi xác nhận, hoặc `export CURSOR_SWAP_YES=1`
 trong shell rc để bỏ qua luôn mọi lần (không chỉ riêng chỗ này).
 
+**Đừng dùng “Log out” trong IDE để đổi account** — lệnh đó thu hồi session trên server,
+khiến snapshot đã lưu không dùng được. Dùng `ide-switch`: tool lưu lại token live của
+account cũ trước khi phục hồi account mới, để giữ token đã được Cursor tự xoay.
+Khi phục hồi, tool xoá cache `cursorAuth/*` cũ trong cùng transaction, giữ lại các key BYOK.
+
 Cùng lưu ý như % usage: **định dạng lưu trên disk không document**, tìm ra bằng cách soi file,
 không phải từ spec chính thức. Cursor update là có thể đổi; nếu `ide-add`/`ide-switch` tự
 nhiên lỗi thì nhiều khả năng do đây — không có cam kết ổn định.
@@ -150,10 +168,8 @@ nhiên lỗi thì nhiều khả năng do đây — không có cam kết ổn đ�
 - **Không auto-switch.** % usage ở trên đến từ API không document, có thể đổi bất cứ lúc nào
   không báo trước — không đáng để xây tự động hóa không giám sát trên đó. Tự chạy
   `cursorswap watch` hoặc `usage` rồi switch tay.
-- **Không tui / menubar.** Sai mô hình phân phối cho 1 file bash tự update — giao diện
-  full-screen cần runtime khác (Python+Textual) và cách cài khác, app menu-bar cần build
-  Swift/rumps riêng, ký code, notarize riêng. Sẽ là dự án khác, không phải tính năng của
-  file này. (`watch` — vòng lặp poll trong terminal thuần — hợp với bash nên đã làm.)
+- **TUI / menubar: chưa triển khai.** Nay khả thi với package Python nhưng chưa có
+  trong bản này. `watch` đã cung cấp vòng lặp poll trong terminal.
 - **Không chạy song song thật sự nhiều session-account.** Đã test `CURSOR_DATA_DIR` xác nhận
   nó không cô lập auth theo process. Cần chạy song song thật thì dùng `add-token` + `run`
   thay vì account session.
@@ -180,6 +196,15 @@ plaintext trên disk, cùng mức tin cậy như file `~/.cursor/cli-config.json
 lưu token đó không mã hoá sẵn rồi. Ai đọc được account máy bạn thì cũng đọc được mấy thứ này
 rồi, tool này không hạ thấp mức bảo mật đó — nhưng hãy coi store (và file `export` bất kỳ) như
 1 file password thật sự.
+
+Python ghi file qua file tạm mode `600` rồi đổi tên atomic; thư mục mode `700`.
+Import nhận archive của Bash, bỏ qua profile đã có trừ khi dùng `--force`, và không nhập
+`mappings.json` (giống Bash). Link/device và đường dẫn thoát khỏi archive bị từ chối.
+Tên profile phải là tên thư mục đơn, không bắt đầu bằng dấu chấm.
+
+Khi test, đặt cả `CURSOR_SWAP_STORE` và `CURSOR_SWAP_IDE_DB` vào thư mục tạm, đồng thời
+mock `security`, `pgrep`, `osascript`, `open`, `agent`. Chỉ đổi DB không ngăn việc tắt app
+thật. `uv run pytest` và `bash tests/smoke.sh uv run cursorswap` đã cô lập các phần này.
 
 ## License
 

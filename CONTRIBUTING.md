@@ -1,5 +1,17 @@
 # Contributing
 
+## Development and verification
+
+The main implementation is the stdlib-only Python package in `src/cursorswap`, built
+with hatchling and managed with uv. Python 3.12+ is required. Run `uv sync`,
+`uv run pytest`, and `bash tests/smoke.sh uv run cursorswap`. The tests isolate HOME,
+`CURSOR_SWAP_STORE`, and `CURSOR_SWAP_IDE_DB`, and mock all Keychain/app/agent calls.
+Never use real account data or quit the running Cursor.app during tests.
+
+Keep the original Bash files compatible for legacy self-update clients. Run
+`bash -n` on each shell file and `shellcheck cursorswap cursor-swap install.sh tests/smoke.sh`.
+Do not add Python runtime dependencies for work that the standard library can handle.
+
 ## Linux / Windows support (help wanted)
 
 `cursorswap` currently only supports macOS. Not because Linux/Windows are hard to script for,
@@ -14,7 +26,7 @@ service: cursor-access-token   account: cursor-user
 service: cursor-refresh-token  account: cursor-user
 ```
 
-`cursorswap`'s macOS backend (`capture_session` / `_restore_session` in `cursorswap`) reads
+`cursorswap`'s macOS backend (`capture` / `restore` in `src/cursorswap/cli_session.py`) reads
 and writes exactly those two items. That's it — no guessing involved, we read the code that
 does it.
 
@@ -38,7 +50,7 @@ the real answer:**
      keyring daemon is assumed)
 3. If you find it, confirm you can round-trip: log out, restore the value you captured, log
    back in without the browser flow, and see `agent status` reflect the account you expect.
-4. Open a PR adding a Linux branch to `_secret_get` / `_secret_set` — see "Where to plug in"
+4. Open a PR adding a verified Linux credential backend — see "Where to plug in"
    below.
 
 ### Windows
@@ -48,21 +60,19 @@ Same approach, but check:
   or raw `CredEnumerate`/`CredRead` via a small P/Invoke)
 - `%APPDATA%\Cursor` / `%LOCALAPPDATA%\cursor-agent` for a plaintext fallback
 
-Note `cursorswap` itself is a bash script — a native Windows PowerShell/cmd user would need
-Git Bash or WSL to run it as-is, or someone willing to port the command layer to PowerShell.
-We'd rather land a verified PowerShell port from someone who can actually run it than merge
-one written blind.
+The command layer is now Python and can run on Windows, but credential storage, config
+paths, and IDE process control remain macOS-specific. A portable runtime alone does not
+make the authentication backend portable; verify the native storage before adding support.
 
 ### Where to plug in
 
-The script funnels every credential read/write through two places in `cursorswap`:
+The Python package funnels CLI credential access through `src/cursorswap/cli_session.py`:
 
-- `capture_session()` — reads the two Keychain items into a saved profile
-- `_restore_session()` — writes a saved profile's values back
+- `secret_get()` / `capture()` — reads the two Keychain items into a saved profile
+- `restore()` — writes a saved profile's values back
 
-Both currently call `security` directly. The change needed is to extract those two calls into
-`_secret_get <service>` / `_secret_set <service> <value>` helpers that dispatch on `uname`
-(`Darwin` → current code, `Linux`/`MINGW*` → new code), and to make the `~/.cursor/cli-config.json`
+These currently call `security` directly. A port needs verified platform-specific
+credential reads/writes and must make the `~/.cursor/cli-config.json`
 path resolution based on the actual per-OS config location `cursor-agent` uses (may not be
 `$HOME/.cursor` outside macOS — check with `agent status` after changing `$HOME`/`%APPDATA%`
 if you're testing this).

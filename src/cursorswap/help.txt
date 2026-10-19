@@ -1,0 +1,50 @@
+{bold}{t:hdr_title}{reset}
+
+{bold}{t:hdr_commands}{reset}
+  cursorswap list                    {t:desc_list}
+  cursorswap status                  {t:desc_status}
+  cursorswap usage [slot|name|...]   {t:desc_usage}
+  cursorswap switch                  {t:desc_switch_rotate}
+  cursorswap switch <slot|name|...>  {t:desc_switch_ref}
+  cursorswap add <name> [--alias A]  {t:desc_add}
+  cursorswap login <name>            {t:desc_login}
+  cursorswap add-token <key|-> [--email E] [--alias A]
+                                       {t:desc_add_token}
+  cursorswap ide-add <name> [--alias A]
+                                       {t:desc_ide_add}
+  cursorswap ide-switch <slot|name|...>
+                                       {t:desc_ide_switch}
+  cursorswap remove <slot|name|...>  {t:desc_remove}
+  cursorswap disable <slot|name|...> {t:desc_disable}
+  cursorswap enable <slot|name|...>  {t:desc_enable}
+  cursorswap run <slot|name> [-- args...]
+                                       {t:desc_run}
+  cursorswap run [-- args...]        {t:desc_run_mapped}
+  cursorswap map <slot|name> [path]  {t:desc_map}
+  cursorswap map                     {t:desc_map_list}
+  cursorswap unmap [path]            {t:desc_unmap}
+  cursorswap alias <slot|name> <short>
+  cursorswap alias <slot|name> --unset
+  cursorswap alias                   {t:desc_alias_list}
+  cursorswap export <path.tar.gz>    {t:desc_export}
+  cursorswap import <path.tar.gz> [--force]
+  cursorswap purge                   {t:desc_purge}
+  cursorswap update                  {t:desc_update_python}
+  cursorswap version                 {t:desc_version}
+  cursorswap watch [seconds]         {t:desc_watch}
+  cursorswap renumber                {t:desc_renumber}
+  cursorswap lang                    {t:desc_lang}
+
+{bold}{t:hdr_flags}{reset}
+  -y, --yes       {t:flag_yes}
+  --force         {t:flag_force}
+  -l, --lang <l>  {t:flag_lang}
+
+{muted}{t:help_usage_pct}{reset}
+
+{muted}{t:help_ide_account}{reset}
+
+{bold}{t:hdr_not_implemented}{reset}
+  {t:help_not_implemented_python}
+
+{muted}{t:help_data:store}{reset}

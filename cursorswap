@@ -78,7 +78,7 @@ API_BASE="https://api2.cursor.sh"
 SVC_ACCESS="cursor-access-token"
 SVC_REFRESH="cursor-refresh-token"
 KC_ACCOUNT="cursor-user"
-IDE_DB="$HOME/Library/Application Support/Cursor/User/globalStorage/state.vscdb"
+IDE_DB="${CURSOR_SWAP_IDE_DB:-$HOME/Library/Application Support/Cursor/User/globalStorage/state.vscdb}"
 
 # ---- color palette --------------------------------------------------------
 # Single warm accent (xterm-256 173, same terracotta tone claude-swap's CLI
@@ -711,14 +711,42 @@ cmd_ide_add() {
     echo "$(_t msg_saved_ide "$name" "$ide_email" "$slot")"
 }
 
+# Cursor.app silently refreshes its session (POST /oauth/token once the JWT is
+# within ~53 days of exp, i.e. about a week after issue) and stores the new
+# token in place - after which the old one is likely rejected server-side.
+# So re-snapshot the outgoing account's live rows into whichever saved profile
+# holds the same auth0 sub, before overwriting them; otherwise that profile's
+# copy goes stale the next time we switch away from it.
+_ide_save_back() {
+    local rows live_sub f
+    rows=$(sqlite3 -json "$IDE_DB" "SELECT key, value FROM ItemTable WHERE key LIKE 'cursorAuth/%';" 2>/dev/null || true)
+    [[ -n "$rows" && "$rows" != "[]" ]] || return 0
+    live_sub=$(_jwt_sub "$(jq -r '.[] | select(.key=="cursorAuth/accessToken") | .value' <<<"$rows")" || true)
+    [[ -n "$live_sub" ]] || return 0
+    for f in "$STORE"/*/ide-auth.json; do
+        [[ -f "$f" ]] || continue
+        if [[ "$(_jwt_sub "$(jq -r '.[] | select(.key=="cursorAuth/accessToken") | .value' "$f")" || true)" == "$live_sub" ]]; then
+            (umask 077; echo "$rows" > "$f.tmp") && mv "$f.tmp" "$f"
+            return 0
+        fi
+    done
+}
+
 _restore_ide_session() {
     local dir="$1"
     [[ -f "$dir/ide-auth.json" ]] || die "$(_t err_no_ide_captured "$(label "$dir")")"
-    local sql; sql=$(jq -r "$_IDE_ROWS_TO_SQL" "$dir/ide-auth.json")
+    # clear the previous account's cursorAuth/* rows first (cachedTeam, teamId,
+    # stripe*, cachedScopedProfile... that the snapshot may not overwrite), but
+    # keep BYOK provider keys - those are the user's own, not per-account.
+    # One -bail transaction, so a failure mid-way leaves the db untouched.
+    local sql; sql="BEGIN IMMEDIATE;
+DELETE FROM ItemTable WHERE key LIKE 'cursorAuth/%' AND key NOT IN ('cursorAuth/openAIKey','cursorAuth/claudeKey','cursorAuth/googleKey','cursorAuth/azureApiKey','cursorAuth/bedrockAccessKey','cursorAuth/bedrockSecretKey');
+$(jq -r "$_IDE_ROWS_TO_SQL" "$dir/ide-auth.json")
+COMMIT;"
     # right after Cursor.app exits, a helper process can briefly still hold the
     # sqlite file lock - retry a couple times before giving up.
     local tries=0
-    until sqlite3 "$IDE_DB" "$sql" 2>/dev/null; do
+    until sqlite3 -bail "$IDE_DB" "$sql" 2>/dev/null; do
         (( tries++ >= 4 )) && die "$(_t err_ide_write_failed "$IDE_DB")"
         sleep 1
     done
@@ -741,6 +769,7 @@ _do_ide_switch() {
         _ide_running && die "$(_t err_ide_quit_timeout)"
     fi
 
+    _ide_save_back
     _restore_ide_session "$dir"
     echo "$(_t msg_swapped_ide "$(label "$dir")")"
     if [[ "$was_running" == "1" ]]; then
@@ -1144,6 +1173,7 @@ cmd_update() {
         *) self="$(command -v -- "$self" 2>/dev/null || echo "$PWD/$self")" ;;
     esac
     [[ -w "$self" ]] || die "$(_t err_not_writable "$self")"
+    echo "note: cursorswap 2.x is a Python rewrite - switch with: curl -fsSL $RAW_BASE/install.sh | bash" >&2
 
     local tmp; tmp=$(mktemp)
     curl -fsSL "$RAW_BASE/cursorswap" -o "$tmp" || { rm -f "$tmp"; die "$(_t err_download_failed)"; }

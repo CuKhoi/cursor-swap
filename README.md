@@ -38,23 +38,35 @@ the CLI session (Keychain-based), `ide-add`/`ide-switch` for the Cursor.app IDE 
 
 ## Install
 
-```
+```sh
 curl -fsSL https://raw.githubusercontent.com/CuKhoi/cursor-swap/main/install.sh | bash
 ```
 
-Installs to `~/.local/bin/cursorswap`. Pass a different directory as an arg if you don't
-want that: `curl -fsSL .../install.sh | bash -s -- /usr/local/bin`.
+Same one-liner to install, to update, and to migrate from the old Bash version (it
+replaces `~/.local/bin/cursorswap`). It installs [uv](https://docs.astral.sh/uv/) if
+missing, then `uv tool install --force git+https://github.com/CuKhoi/cursor-swap`, which
+you can also run by hand. Python 3.12+ is provisioned by uv; there are zero runtime
+Python dependencies and no `jq` or newer Bash needed. Install the
+[`cursor-agent` CLI](https://cursor.com/cli) for CLI login/session commands; IDE-only use
+just needs Cursor.app. macOS only.
 
-Or clone and run it locally:
+Your profiles stay in `~/.cursor-accounts` (or `CURSOR_SWAP_STORE`); no migration is
+needed. Both versions read the same files. `cursorswap update` now runs
+`uv tool upgrade cursorswap`.
 
-```
-git clone git@github.com:CuKhoi/cursor-swap.git
+For development:
+
+```sh
+git clone https://github.com/CuKhoi/cursor-swap
 cd cursor-swap
-./install.sh
+uv sync
+uv run pytest
+uv run cursorswap --help
 ```
 
-Requires `jq` (`brew install jq`) and the [`cursor-agent` CLI](https://cursor.com/cli) already
-installed.
+The Bash `cursorswap` file stays in the repo so old installs' built-in `update` keeps
+working (it now also prints how to switch to the Python version). `cursor-swap` remains a
+compatibility shim; use `cursorswap`.
 
 ## Usage
 
@@ -95,7 +107,7 @@ cursorswap disable work            # skip in rotation
 cursorswap remove work
 cursorswap export backup.tar.gz    # contains plaintext tokens - store securely
 cursorswap import backup.tar.gz
-cursorswap update                  # pull the latest cursorswap from GitHub, replace self
+cursorswap update                  # uv tool upgrade cursorswap
 cursorswap version                 # print the installed version
 cursorswap watch                   # repeat 'list' every 30s (pass a number to change it)
 cursorswap renumber                # close gaps in slot numbers after removals
@@ -116,9 +128,10 @@ the same Bearer access-token cursorswap already stores per profile. `list`, `swi
 
 This is **not a public/documented Cursor API** — found by reading the CLI's minified JS, not
 from any spec. No stability guarantee; a Cursor update can silently break it, in which case
-these commands just show nothing (they never hard-fail because of it). Usage % for a saved
-but currently-inactive profile depends on that profile's snapshotted access-token still being
-valid — if it's expired, `switch` to that account once to refresh it.
+`list` and `switch` show a localized failure reason in place of the percentage;
+`usage` exits non-zero when lookup fails. The active profile uses its live token.
+Inactive snapshots can be rejected before JWT expiry; switching alone cannot repair
+a revoked token. Log in again and re-run `add` / `ide-add` when that happens.
 
 ## IDE account (undocumented storage)
 
@@ -143,6 +156,11 @@ quits it for you (asks to confirm — this closes every open IDE window) and rel
 after. Pass `-y`/`--yes` to skip the confirmation, or `export CURSOR_SWAP_YES=1` in your
 shell rc to always skip it (for every confirmation prompt in the tool, not just this one).
 
+**Don't use the IDE's own "Log out" to change accounts** — it revokes that session on
+Cursor's server, so the saved snapshot stops working and you'd have to log in again and
+re-run `ide-add`. Switch with `cursorswap ide-switch` instead; it also re-saves the outgoing
+account's session first, since Cursor silently refreshes its token every so often.
+
 Same caveat as usage %: **undocumented on-disk format**, found by inspection, not from a
 spec. A Cursor update can change it; if `ide-add`/`ide-switch` starts failing, that's likely
 why — no stability guarantee.
@@ -152,11 +170,8 @@ why — no stability guarantee.
 - **No auto-switch.** The usage % above comes from an undocumented endpoint that can change
   without notice — not something to build unattended automation on. Use `cursorswap watch`
   or `usage` yourself and switch manually.
-- **No tui / menubar.** Wrong distribution model for a single self-updating bash script — a
-  full-screen UI needs a different runtime (Python+Textual) and install path, a menu-bar app
-  needs its own Swift/rumps build, code signing, and notarization. Would be a separate
-  project, not a feature of this file. (`watch`, a plain terminal polling loop, fits fine in
-  bash and is implemented.)
+- **TUI / menubar: not implemented.** Both are now feasible with the Python package,
+  but neither is included. `watch` provides a terminal polling loop.
 - **No true concurrent multi-session for browser-login accounts.** Confirmed via testing
   `CURSOR_DATA_DIR` — it does not isolate auth per process. If you need real concurrency,
   use `add-token` + `run` instead of session accounts.
@@ -184,6 +199,17 @@ and as `security find-generic-password` output. `ide-auth.json` (from `ide-add`)
 too, same trust model as Cursor.app's own `state.vscdb`, which already stores the same tokens
 unencrypted. Anyone with read access to your user account can already read these; this tool
 doesn't lower that bar, but treat the store (and any `export` archive) like a password file.
+
+Python writes use private temporary files and atomic replacement: directories mode `700`,
+all profile files mode `600`. Import accepts Bash exports, skips existing profiles unless
+`--force` is supplied, and leaves `mappings.json` alone (matching Bash). Unsafe archive
+links/devices and path traversal are rejected. Profile names must be visible single
+directory names, not paths.
+
+For isolated testing, set both `CURSOR_SWAP_STORE` and `CURSOR_SWAP_IDE_DB` to temporary
+paths. A DB override alone does not prevent the real app from being quit: tests must
+also mock `pgrep`, `osascript`, `open`, Keychain and `agent` calls. `uv run pytest` and
+`bash tests/smoke.sh uv run cursorswap` already provide that isolation.
 
 ## License
 

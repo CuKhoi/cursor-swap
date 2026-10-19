@@ -4,11 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`cursorswap` — a single macOS bash script that snapshots and restores multiple Cursor
-account logins (both the `cursor-agent` CLI and the Cursor.app desktop IDE), so a user can
-switch between accounts without re-authenticating each time. No build step, no package
-manager, no runtime dependency beyond the script itself, `jq`, and `sqlite3`/`security`
-(both ship with macOS).
+`cursorswap` — a Python 3.12+ package managed with uv, with zero runtime Python
+dependencies. It snapshots and restores Cursor CLI and Cursor.app logins on macOS.
+The original Bash tool remains available for existing installs, with identical storage.
 
 ## Commands
 
@@ -17,40 +15,65 @@ manager, no runtime dependency beyond the script itself, `jq`, and `sqlite3`/`se
 bash -n cursorswap cursor-swap install.sh
 shellcheck cursorswap cursor-swap install.sh    # brew install shellcheck if missing
 
-# reinstall the local working copy over the installed binary, for manual testing
-./install.sh                                     # installs to ~/.local/bin
-
-# run the exact smoke test CI runs, against an isolated store (never touches
-# the real ~/.cursor-accounts or Keychain/IDE data)
-export CURSOR_SWAP_STORE=/tmp/cswap-test-store CURSOR_SWAP_YES=1
-./cursorswap add-token sk-test --email test@example.com --alias t
-./cursorswap list
-./cursorswap remove t
+uv sync
+uv run pytest
+uv run cursorswap --help
+bash tests/smoke.sh uv run cursorswap
 ```
 
-There is no test suite beyond the CI smoke test in `.github/workflows/ci.yml` — this is a
-single bash file with no unit-testable internal API. Verification is: syntax check,
-shellcheck, then exercising real commands against `CURSOR_SWAP_STORE` pointed at a scratch
-directory. **Never test destructive commands (`remove`, `purge`, `switch`, `ide-switch`)
-against the real store without `CURSOR_SWAP_STORE` set** — a prior session in this repo
-accidentally deleted a real saved profile this way.
+`tests/conftest.py` isolates HOME, store, and IDE DB for every test, mocks all subprocess
+calls and API-key exec, and blocks unmocked HTTP. IDE tests use temporary sqlite databases
+and fake JWTs. `tests/smoke.sh` isolates the console commands in the same way, using shell
+stubs for system commands. **Never test destructive commands against the real store.**
+Always set both `CURSOR_SWAP_STORE` and `CURSOR_SWAP_IDE_DB` to temporary paths and mock
+`security`, `pgrep`, `osascript`, `open`, and `agent`. The DB override does not prevent
+quitting the real Cursor.app. A prior session accidentally deleted a real saved profile.
 
 CI (`.github/workflows/ci.yml`) runs on `macos-latest` specifically — the tool is
 macOS-only and the smoke test exercises real commands, not just static analysis.
 
 ## Architecture
 
-### Three files, one is a compatibility shim
+### Python layout
 
-- `cursorswap` — the actual tool (~1300 lines, grows over time — check `wc -l` rather than
-  trusting this number). Everything below is about this file.
+- `pyproject.toml`: hatchling, console entry point `cursorswap.cli:main`, pytest dev group.
+  `uv.lock` locks development dependencies; runtime dependencies are empty.
+- `src/cursorswap/__init__.py`: single source of truth for Python version 2.0.0.
+- `cli.py`: global flag stripping, aliases, all command handlers, confirmations, archives.
+- `store.py`: Bash-compatible profiles/mappings, reference lookup, slots/renumber,
+  private directories and atomic mode-600 writes.
+- `cli_session.py`: Keychain and CLI config capture/restore; restores only the three
+  account-specific config keys, preserving other local preferences.
+- `ide.py`: parameterized sqlite reads/writes, JWT subject matching, outgoing save-back,
+  and quit/restore/relaunch. Restore is one transaction; retry locked DBs five times.
+- `usage.py`: urllib POST with a four-second timeout; live tokens preferred for active
+  profiles, with localized failure reasons and one-decimal percentages.
+- `i18n.py`, `colors.py`, `help.txt`: verbatim EN/VI Bash catalogs, literal placeholders,
+  ANSI palette, and bilingual help. Python-specific help has separate message keys.
+- `tests/`: pytest and isolated console smoke test; CI keeps the Bash job and adds Python.
+
+Reference lookup preserves Bash's alphabetical profile traversal, checking name, slot,
+alias, then email within each directory (so an earlier alias can shadow a later name).
+Imports preserve the Bash behavior of ignoring archived mappings. Python additionally
+rejects unsafe archive entries and path-like/hidden profile names, and makes every
+profile file mode 600. `run` restores the previous CLI profile in a finally block;
+API-key runs exec `agent` directly. `update` uses `uv tool upgrade cursorswap`.
+TUI/menubar are now feasible but not implemented; quota-based auto-switch remains absent.
+
+### Legacy files and self-update compatibility
+
+- `cursorswap` — the Bash behavioral specification and legacy tool. The implementation
+  notes below retain its original function names; Python equivalents are listed above.
 - `cursor-swap` (no `w`, has the hyphen) — the tool's old name before a rename. Kept
   forever as a tiny forwarding shim, **not** because it's still in use: an existing user's
   installed `cursor-swap` runs its own `update` command, which fetches this exact path from
   GitHub and overwrites itself with whatever's there. Deleting this file would break every
   pre-rename install's self-update. It downloads `cursorswap` next to itself (once) and
   execs into it.
-- `install.sh` — installs both of the above to `~/.local/bin` (or an arg-given dir).
+- `install.sh` — the one-line installer users pipe from GitHub raw. Installs uv if missing,
+  then `uv tool install --force` the Python package (the checkout itself when run from one,
+  else `git+` main; `--force` replaces an old Bash `cursorswap`), plus the `cursor-swap`
+  shim. Optional arg = bin dir (`UV_TOOL_BIN_DIR`). Same command installs and updates.
 
 ### bash-3.2 compatibility guard (top of `cursorswap`, before `set -euo pipefail`)
 
@@ -113,14 +136,30 @@ never valid lands in the same bucket, so the stronger causal claim would sometim
 
 **Saved IDE session tokens get revoked server-side long before their JWT `exp`** — a stale
 snapshot returns HTTP 401 `{"code":"unauthenticated", ..., "error":"ERROR_NOT_LOGGED_IN"}`
-while its `exp` claim is still ~2 months out, so expiry checks won't predict it. There is no
-recovery path in the tool: the IDE's `cursorAuth/refreshToken` is *byte-identical* to its
-`cursorAuth/accessToken` (one session token stored under two keys, not a real refresh grant),
-so nothing can be exchanged for a fresh token. Only a real IDE re-login + `ide-add` fixes it.
-The currently-active profile is unaffected because `_effective_access_token()` reads the live
-Keychain/sqlite token for it. Why some snapshots get revoked and others don't is unresolved —
-it does not track capture time, and does not appear to be rotation-during-use (an active
-profile's live token was still byte-identical to its snapshot 15h after capture).
+while its `exp` claim is still ~2 months out, so expiry checks won't predict it. The
+currently-active profile is unaffected because `_effective_access_token()` reads the live
+Keychain/sqlite token for it.
+
+Causes, from reading Cursor.app 3.25.9's `out/vs/workbench/workbench.desktop.main.js` (auth
+service, `_performAccessTokenRefresh` / `logout` / `revokeCursorSession`):
+
+- **Silent refresh rotation.** The IDE *does* refresh: `POST {backendUrl}/oauth/token` with
+  `{grant_type:"refresh_token", client_id:<cursorCreds.authClientId>, refresh_token}` once
+  the JWT is within `U8m = 1272h` (~53 days) of `exp` — i.e. roughly a week after issue, not
+  after capture (which is why 15h-old snapshots still matched). It stores the response's
+  `access_token` under *both* keys, which is why they're byte-identical. The old token is then
+  likely rejected. `_ide_save_back()` (called in `_do_ide_switch()` before restoring) re-
+  snapshots the outgoing account's live rows into the profile with the same JWT `sub`, so a
+  rotated token is captured instead of lost.
+- **IDE "Log out" revokes server-side.** `logout()` → `revokeCursorSession()` →
+  `POST {backendUrl}/auth/logout` with the bearer token. Logging out in the IDE to switch
+  accounts by hand kills that account's saved snapshot; only a re-login + `ide-add` fixes it.
+
+`_restore_ide_session()` deletes all `cursorAuth/*` rows (except BYOK provider keys) before
+inserting the snapshot, in one `sqlite3 -bail` transaction, so the previous account's
+`cachedTeam`/`teamId`/`stripe*` rows don't leak into the next one. `CURSOR_SWAP_IDE_DB`
+overrides the db path for testing — and since `_do_ide_switch()` will really quit a running
+Cursor.app, shim `pgrep` to `exit 1` in `PATH` when testing while the app is open.
 
 ### i18n
 
@@ -166,6 +205,8 @@ stuck run.
 
 ### Dispatch
 
-Single `case "${1:-}" in ... esac` at the very bottom maps subcommands to `cmd_*`
-functions. Flags (`-y`/`--yes`, `--force`, `-l`/`--lang`) are stripped out of `$@` in a loop
-before the dispatch runs.
+Python `cli.main()` strips global flags (`-y`/`--yes`, `--force`, `-l`/`--lang`,
+`--lang=`) throughout argv, matching Bash even after `--`, then dispatches to `CLI.cmd_*`.
+Expected errors go to stderr with exit 1. The legacy Bash script retains its bottom-level
+case dispatch. Keep `cursorswap`, `cursor-swap`, and `install.sh` compatible with their
+exact GitHub raw paths: old installs depend on them for self-update.

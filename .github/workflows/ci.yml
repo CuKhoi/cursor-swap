@@ -29,6 +29,7 @@ jobs:
       - name: Smoke test (isolated store, no real Keychain/IDE data touched)
         env:
           CURSOR_SWAP_STORE: ${{ runner.temp }}/cswap-ci-store
+          CURSOR_SWAP_IDE_DB: ${{ runner.temp }}/cswap-ci-state.vscdb
           CURSOR_SWAP_YES: "1"
         run: |
           chmod +x cursorswap cursor-swap install.sh
@@ -67,3 +68,15 @@ jobs:
           rm -rf "$RUNNER_TEMP/install-test"
           ./install.sh "$RUNNER_TEMP/install-test"
           "$RUNNER_TEMP/install-test/cursorswap" version
+
+  python:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - run: uv run pytest
+      - name: Smoke test (uv run cursorswap, isolated home/store/IDE and system stubs)
+        run: bash tests/smoke.sh uv run cursorswap
