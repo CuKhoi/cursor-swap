@@ -44,8 +44,8 @@ cursorswap switch                  # xoay sang account kế tiếp còn enable
 cursorswap list                    # các account, account đang active, % usage
 ```
 
-`switch` và `logout-local` sẽ tắt Cursor.app (hỏi trước - đóng HẾT mọi window IDE), ghi
-session, rồi mở lại app. Thêm `-y` hoặc `export CURSOR_SWAP_YES=1` để khỏi bị hỏi.
+`switch` và `logout-local` tắt Cursor.app luôn, không hỏi (đóng HẾT mọi window IDE), ghi
+session, rồi mở lại app.
 
 **Đừng bao giờ dùng "Log out" trong IDE để đổi account.** Nó huỷ session đó trên server
 của Cursor, snapshot đã lưu sẽ không dùng được nữa và phải login lại rồi chạy lại `add`.

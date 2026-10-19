@@ -44,9 +44,8 @@ cursorswap switch                  # rotate to the next enabled account
 cursorswap list                    # accounts, which one is active, usage %
 ```
 
-`switch` and `logout-local` quit Cursor.app (asking first - this closes every IDE window),
-write the session, and relaunch it. Pass `-y` or `export CURSOR_SWAP_YES=1` to skip the
-prompt.
+`switch` and `logout-local` quit Cursor.app without asking (this closes every IDE window),
+write the session, and relaunch it.
 
 **Never use the IDE's own "Log out" to change accounts.** It revokes that session on
 Cursor's server, so its saved snapshot stops working and you'd have to log in again and

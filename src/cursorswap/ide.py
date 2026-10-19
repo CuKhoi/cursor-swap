@@ -111,7 +111,7 @@ def capture(store, name, alias, confirm):
         old = meta.get("ide_email") or meta.get("email")
         if old != email:
             confirm(t("confirm_overwrite", name, old or "?"))
-        meta.update(email=email, ide_email=email, type="ide-only")
+        meta.update(email=email, ide_email=email, type="ide-only", saved_at=metadata(email, 0, "", "")["saved_at"])
         alias = alias or meta.get("alias")
         meta["alias"] = alias or None
     else:
@@ -159,11 +159,12 @@ def running():
     return command(["pgrep", "-x", "Cursor"], quiet=True) == 0
 
 
-def quit_app(confirm):
-    """Quits Cursor.app (after confirming) if it's running; returns whether it was."""
+def quit_app():
+    """Quits Cursor.app if it's running (no prompt - switching is the whole point, and
+    the app is relaunched right after); returns whether it was running."""
     if not running():
         return False
-    confirm(t("confirm_ide_quit"))
+    print(t("msg_ide_quitting"))
     command(["osascript", "-e", 'quit app "Cursor"'], quiet=True)
     waited = 0
     while running() and waited < 15:
@@ -187,7 +188,7 @@ def switch(store, directory, confirm):
         raise Error(t("err_ide_db_not_found", db_path()))
     if not (directory / "ide-auth.json").is_file():
         raise Error(t("err_no_ide_captured_ref", label(directory), directory.name))
-    was_running = quit_app(confirm)
+    was_running = quit_app()
     save_back(store)
     restore(directory)
     print(t("msg_swapped_ide", label(directory)))
@@ -206,7 +207,7 @@ def logout_local(store, confirm):
         return
     if not profile_for_sub(store, jwt_sub(row_value(rows, "accessToken"))):
         confirm(t("confirm_ide_logout_unsaved", email_for_rows(store, rows) or "?"))
-    was_running = quit_app(confirm)
+    was_running = quit_app()
     save_back(store)
     replace_auth_rows([])
     print(t("msg_ide_logged_out_local"))

@@ -27,11 +27,11 @@
   --force         {t:flag_force}
   -l, --lang <l>  {t:flag_lang}
 
-{muted}{t:help_usage_pct}{reset}
+{muted}{t:help_usage_pct_ide}{reset}
 
 {muted}{t:help_ide_flow}{reset}
 
 {bold}{t:hdr_not_implemented}{reset}
   {t:help_not_implemented_ide}
 
-{muted}{t:help_data:store}{reset}
+{muted}{t:help_data_ide:store}{reset}

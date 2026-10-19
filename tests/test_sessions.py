@@ -192,3 +192,19 @@ def test_logout_local_unsaved_session_needs_confirmation(isolated, monkeypatch):
     assert exc.value.code == 1
     assert ide.live_token() == jwt("auth0|unsaved")
     assert not isolated["calls"]
+
+
+def test_switch_never_prompts_and_readd_refreshes_saved_at(isolated, monkeypatch, capsys):
+    add("a", "a@example.com")
+    add("b", "b@example.com")
+    directory = Store().require("a")
+    meta = read_json(directory / "meta.json")
+    meta["saved_at"] = "2000-01-01T00:00:00Z"
+    write_json(directory / "meta.json", meta)
+    monkeypatch.delenv("CURSOR_SWAP_YES")  # stdin is empty: any prompt would abort
+    isolated["running"] = True
+    assert cli.main(["switch", "a"]) == 0
+    assert "Quitting Cursor.app" in capsys.readouterr().out
+    assert ["open", "-a", "Cursor"] in isolated["calls"]
+    assert cli.main(["add", "a"]) == 0
+    assert read_json(directory / "meta.json")["saved_at"] != "2000-01-01T00:00:00Z"
