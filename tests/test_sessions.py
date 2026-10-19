@@ -254,3 +254,38 @@ def test_effective_tokens_prefer_live_then_snapshot(isolated):
     assert usage.effective_access_token(Store(), directory) == "saved-cli"
     (directory / "access-token").unlink()
     assert usage.effective_access_token(Store(), directory) == jwt("auth0|ide")
+
+
+def test_ide_logout_local_keeps_session_and_saves_rotated_token(isolated, capsys):
+    database(token=jwt("auth0|a"))
+    assert cli.main(["ide-add", "a"]) == 0
+    rotated = jwt("auth0|a", 2)
+    database(token=rotated, extra={"cursorAuth/cachedTeam": "team",
+             **dict.fromkeys(ide.BYOK_KEYS, "user's-provider-key"), "unrelated": "keep"})
+    isolated["running"] = True
+    assert cli.main(["ide-logout-local"]) == 0
+    with sqlite3.connect(ide.db_path()) as conn:
+        rows = dict(conn.execute("SELECT key, value FROM ItemTable"))
+    assert not [k for k in rows if k.startswith("cursorAuth/") and k not in ide.BYOK_KEYS]
+    assert all(rows[key] == "user's-provider-key" for key in ide.BYOK_KEYS)
+    assert rows["unrelated"] == "keep"
+    saved = read_json(Store().require("a") / "ide-auth.json")
+    assert ide.row_value(saved, "accessToken") == rotated
+    assert ["osascript", "-e", 'quit app "Cursor"'] in isolated["calls"]
+    assert ["open", "-a", "Cursor"] in isolated["calls"]
+    assert "ide-add" in capsys.readouterr().out
+    # Already logged out: no-op, no quit.
+    isolated["calls"].clear()
+    assert cli.main(["ide-logout-local"]) == 0
+    assert "nothing to do" in capsys.readouterr().out
+    assert not isolated["calls"]
+
+
+def test_ide_logout_local_unsaved_session_needs_confirmation(isolated, monkeypatch):
+    database(token=jwt("auth0|unsaved"))
+    monkeypatch.delenv("CURSOR_SWAP_YES")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["ide-logout-local"])
+    assert exc.value.code == 1
+    assert ide.live_token() == jwt("auth0|unsaved")
+    assert not isolated["calls"]

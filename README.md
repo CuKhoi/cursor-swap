@@ -100,6 +100,13 @@ cursorswap run                     # auto-picks "work" from the directory mappin
 # or swapping just the IDE side on its own.
 cursorswap ide-add work            # (re-)snapshot ONLY the currently logged-in IDE session
 cursorswap ide-switch work         # swap ONLY the IDE session, leave the CLI alone
+cursorswap ide-logout-local        # sign the IDE out locally WITHOUT revoking the session
+
+# adding a 2nd IDE account (never use the IDE's own Log out for this):
+cursorswap ide-add personal        # 1. save the account that's logged in now
+cursorswap ide-logout-local        # 2. sign out locally - 'personal' stays valid
+                                   # 3. log in to the other account in Cursor.app
+cursorswap ide-add work            # 4. save it; now 'ide-switch personal|work' both work
 
 # housekeeping
 cursorswap alias 1 work            # short name for a slot
@@ -159,7 +166,9 @@ shell rc to always skip it (for every confirmation prompt in the tool, not just 
 **Don't use the IDE's own "Log out" to change accounts** — it revokes that session on
 Cursor's server, so the saved snapshot stops working and you'd have to log in again and
 re-run `ide-add`. Switch with `cursorswap ide-switch` instead; it also re-saves the outgoing
-account's session first, since Cursor silently refreshes its token every so often.
+account's session first, since Cursor silently refreshes its token every so often. To log
+in to a new account, sign out with `cursorswap ide-logout-local` — it only deletes the
+auth rows on this machine, so the old session is never revoked (Python version only).
 
 Same caveat as usage %: **undocumented on-disk format**, found by inspection, not from a
 spec. A Cursor update can change it; if `ide-add`/`ide-switch` starts failing, that's likely

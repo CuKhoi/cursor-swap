@@ -114,6 +114,9 @@ class CLI:
             raise Error(t("err_no_ide_captured_ref", label(directory), ref))
         ide.switch(self.store, directory, self.confirm)
 
+    def cmd_ide_logout_local(self, args):
+        ide.logout_local(self.store, self.confirm)
+
     def maybe_switch_ide(self, directory):
         if (directory / "ide-auth.json").is_file():
             ide.switch(self.store, directory, self.confirm)
@@ -428,7 +431,7 @@ def main(argv=None):
         if command in ("enable", "disable"):
             cli.cmd_enable_disable(args, command == "enable")
             return 0
-        commands = {"add", "login", "add-token", "ide-add", "ide-switch", "switch", "use", "list", "status",
+        commands = {"add", "login", "add-token", "ide-add", "ide-switch", "ide-logout-local", "switch", "use", "list", "status",
                     "usage", "remove", "run", "map", "unmap", "alias", "export", "import", "purge", "version",
                     "lang", "watch", "renumber", "update", "help"}
         if command not in commands:

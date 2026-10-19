@@ -154,6 +154,10 @@ service, `_performAccessTokenRefresh` / `logout` / `revokeCursorSession`):
 - **IDE "Log out" revokes server-side.** `logout()` → `revokeCursorSession()` →
   `POST {backendUrl}/auth/logout` with the bearer token. Logging out in the IDE to switch
   accounts by hand kills that account's saved snapshot; only a re-login + `ide-add` fixes it.
+  `cursorswap ide-logout-local` (Python only, `ide.logout_local()`) is the safe substitute:
+  quit, save-back, delete the `cursorAuth/*` rows (BYOK kept) via `replace_auth_rows([])`,
+  relaunch — the IDE starts signed out without ever calling `/auth/logout`. It confirms
+  first if the live session isn't saved in any profile (it'd be lost locally).
 
 `_restore_ide_session()` deletes all `cursorAuth/*` rows (except BYOK provider keys) before
 inserting the snapshot, in one `sqlite3 -bail` transaction, so the previous account's

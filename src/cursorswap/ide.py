@@ -111,7 +111,10 @@ def restore(directory):
     snapshot = directory / "ide-auth.json"
     if not snapshot.is_file():
         raise Error(t("err_no_ide_captured", label(directory)))
-    rows = read_json(snapshot)
+    replace_auth_rows(read_json(snapshot))
+
+
+def replace_auth_rows(rows):
     for attempt in range(5):
         try:
             with closing(sqlite3.connect(db_path(), timeout=0)) as conn:
@@ -134,24 +137,57 @@ def running():
     return command(["pgrep", "-x", "Cursor"], quiet=True) == 0
 
 
-def switch(store, directory, confirm):
-    if not db_path().is_file():
-        raise Error(t("err_ide_db_not_found", db_path()))
-    was_running = running()
-    if was_running:
-        confirm(t("confirm_ide_quit"))
-        command(["osascript", "-e", 'quit app "Cursor"'], quiet=True)
-        waited = 0
-        while running() and waited < 15:
-            time.sleep(1)
-            waited += 1
-        if running():
-            raise Error(t("err_ide_quit_timeout"))
-    save_back(store)
-    restore(directory)
-    print(t("msg_swapped_ide", label(directory)))
+def quit_app(confirm):
+    """Quits Cursor.app (after confirming) if it's running; returns whether it was."""
+    if not running():
+        return False
+    confirm(t("confirm_ide_quit"))
+    command(["osascript", "-e", 'quit app "Cursor"'], quiet=True)
+    waited = 0
+    while running() and waited < 15:
+        time.sleep(1)
+        waited += 1
+    if running():
+        raise Error(t("err_ide_quit_timeout"))
+    return True
+
+
+def relaunch(was_running):
     if was_running:
         command(["open", "-a", "Cursor"], check=True)
         print(t("msg_relaunched"))
     else:
         print(t("msg_ide_not_running"))
+
+
+def switch(store, directory, confirm):
+    if not db_path().is_file():
+        raise Error(t("err_ide_db_not_found", db_path()))
+    was_running = quit_app(confirm)
+    save_back(store)
+    restore(directory)
+    print(t("msg_swapped_ide", label(directory)))
+    relaunch(was_running)
+
+
+def logout_local(store, confirm):
+    """Signs the IDE out on this machine only, by deleting its auth rows. Unlike the
+    IDE's own "Log out" (POST /auth/logout), the session stays valid server-side, so
+    its saved snapshot keeps working - the way to log in a second account."""
+    if not db_path().is_file():
+        raise Error(t("err_ide_db_not_found", db_path()))
+    rows = live_rows()
+    if not row_value(rows, "accessToken"):
+        print(t("msg_ide_already_logged_out"))
+        return
+    sub = jwt_sub(row_value(rows, "accessToken"))
+    saved = sub and any(
+        (d / "ide-auth.json").is_file() and jwt_sub(row_value(read_json(d / "ide-auth.json"), "accessToken")) == sub
+        for d in store.profiles())
+    if not saved:
+        confirm(t("confirm_ide_logout_unsaved", email_for_rows(store, rows) or "?"))
+    was_running = quit_app(confirm)
+    save_back(store)
+    replace_auth_rows([])
+    print(t("msg_ide_logged_out_local"))
+    relaunch(was_running)

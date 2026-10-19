@@ -14,6 +14,7 @@
                                        {t:desc_ide_add}
   cursorswap ide-switch <slot|name|...>
                                        {t:desc_ide_switch}
+  cursorswap ide-logout-local        {t:desc_ide_logout_local}
   cursorswap remove <slot|name|...>  {t:desc_remove}
   cursorswap disable <slot|name|...> {t:desc_disable}
   cursorswap enable <slot|name|...>  {t:desc_enable}

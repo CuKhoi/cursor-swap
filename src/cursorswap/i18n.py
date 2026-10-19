@@ -290,11 +290,19 @@ MSG_EN.update({
     "desc_update_python": "upgrade with uv tool upgrade cursorswap",
     "msg_update_uv": "Install uv, then run: uv tool upgrade cursorswap (install: uv tool install git+https://github.com/CuKhoi/cursor-swap)",
     "err_unsafe_archive": "unsafe archive member: {1}",
+    "desc_ide_logout_local": "sign the IDE out on THIS machine only (session stays\n                                       valid server-side, so its snapshot keeps working).\n                                       use this - not the IDE's own Log out, which revokes\n                                       it - before logging in another account + ide-add",
+    "msg_ide_already_logged_out": "Cursor.app IDE isn't logged in - nothing to do.",
+    "confirm_ide_logout_unsaved": "The current IDE session ({1}) isn't saved in any profile - logging out locally loses it (run 'cursorswap ide-add <name>' first to keep it). Continue?",
+    "msg_ide_logged_out_local": "Signed the IDE out locally (session not revoked). Log in to another account in Cursor.app, then run: cursorswap ide-add <name>",
     "help_not_implemented_python": "auto (quota-based auto-switch) - the usage API is undocumented; use\n    'cursorswap watch'/'usage' and switch manually.\n  tui (full-screen UI) / menubar (macOS menu-bar app) - now feasible with\n    the Python package, but not implemented.",
 })
 MSG_VI.update({
     "desc_update_python": "cập nhật bằng uv tool upgrade cursorswap",
     "msg_update_uv": "Cài uv, rồi chạy: uv tool upgrade cursorswap (cài đặt: uv tool install git+https://github.com/CuKhoi/cursor-swap)",
     "err_unsafe_archive": "thành phần archive không an toàn: {1}",
+    "desc_ide_logout_local": "đăng xuất IDE CHỈ trên máy này (session vẫn còn hiệu lực\n                                       trên server, nên snapshot của nó vẫn dùng được).\n                                       dùng lệnh này - không dùng Log out của IDE, vì nó\n                                       huỷ session - trước khi login account khác + ide-add",
+    "msg_ide_already_logged_out": "IDE Cursor.app chưa login - không có gì để làm.",
+    "confirm_ide_logout_unsaved": "Session IDE hiện tại ({1}) chưa được lưu vào profile nào - đăng xuất local sẽ mất nó (chạy 'cursorswap ide-add <tên>' trước để giữ lại). Tiếp tục?",
+    "msg_ide_logged_out_local": "Đã đăng xuất IDE ở local (session không bị huỷ). Login account khác trong Cursor.app, rồi chạy: cursorswap ide-add <tên>",
     "help_not_implemented_python": "auto (tự switch theo quota) - API usage không document; dùng\n    'cursorswap watch'/'usage' rồi tự switch tay.\n  tui (giao diện full-screen) / menubar (app macOS riêng) - nay khả thi\n    với package Python, nhưng chưa triển khai.",
 })

@@ -98,6 +98,13 @@ cursorswap run                     # tự chọn "work" theo mapping thư mục
 # 'add' ở trên đã tự chụp IDE nếu đang login rồi - 2 lệnh dưới để chụp lại/đổi riêng IDE.
 cursorswap ide-add work            # (chụp lại) CHỈ session IDE đang login hiện tại
 cursorswap ide-switch work         # CHỈ đổi session IDE, không đụng CLI
+cursorswap ide-logout-local        # đăng xuất IDE ở local, KHÔNG huỷ session trên server
+
+# thêm account IDE thứ 2 (đừng bao giờ dùng Log out của IDE để làm việc này):
+cursorswap ide-add personal        # 1. lưu account đang login
+cursorswap ide-logout-local        # 2. đăng xuất local - 'personal' vẫn còn hiệu lực
+                                   # 3. login account kia trong Cursor.app
+cursorswap ide-add work            # 4. lưu nó; giờ 'ide-switch personal|work' đều chạy
 
 # việc vặt khác
 cursorswap alias 1 work            # đặt tên tắt cho 1 slot
@@ -158,6 +165,8 @@ trong shell rc để bỏ qua luôn mọi lần (không chỉ riêng chỗ này)
 khiến snapshot đã lưu không dùng được. Dùng `ide-switch`: tool lưu lại token live của
 account cũ trước khi phục hồi account mới, để giữ token đã được Cursor tự xoay.
 Khi phục hồi, tool xoá cache `cursorAuth/*` cũ trong cùng transaction, giữ lại các key BYOK.
+Muốn login account mới thì đăng xuất bằng `cursorswap ide-logout-local` — lệnh chỉ xoá các
+dòng auth trên máy này, nên session cũ không bao giờ bị huỷ (chỉ có ở bản Python).
 
 Cùng lưu ý như % usage: **định dạng lưu trên disk không document**, tìm ra bằng cách soi file,
 không phải từ spec chính thức. Cursor update là có thể đổi; nếu `ide-add`/`ide-switch` tự
