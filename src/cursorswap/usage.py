@@ -5,33 +5,21 @@ from http.client import HTTPException
 from decimal import Decimal, ROUND_HALF_UP
 from urllib import request, error
 
-from . import cli_session, ide
+from . import ide
 from .colors import muted, sev_pct
 from .i18n import t
-from .store import read_json
 
 URL = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage"
 
 
-def any_access_token(directory):
-    if (directory / "access-token").is_file():
-        return (directory / "access-token").read_text().rstrip("\n")
-    if (directory / "ide-auth.json").is_file():
-        return ide.row_value(read_json(directory / "ide-auth.json"), "accessToken")
-    return ""
-
-
-def effective_access_token(store, directory):
-    meta = read_json(directory / "meta.json")
-    if meta["type"] == "session" and meta["email"] == cli_session.current_email() and cli_session.has_session():
-        token = cli_session.secret_get("cursor-access-token")
-        if token:
-            return token
-    if meta.get("ide_email") and meta["ide_email"] == ide.current_email(store):
-        token = ide.live_token()
-        if token:
-            return token
-    return any_access_token(directory)
+def effective_access_token(directory):
+    """The live token for the account Cursor.app is signed into right now (the IDE
+    rotates it silently, so the snapshot can be stale), else the saved snapshot's."""
+    live = ide.live_token()
+    sub = ide.snapshot_sub(directory)
+    if live and sub and ide.jwt_sub(live) == sub:
+        return live
+    return ide.row_value(ide.snapshot_rows(directory), "accessToken")
 
 
 def summary(token):
@@ -50,7 +38,7 @@ def summary(token):
     except (OSError, error.URLError, ValueError, HTTPException):
         return t("usage_err_network"), False
     if status in (401, 403):
-        return t("usage_err_revoked"), False
+        return t("usage_err_rejected_ide"), False
     if status != 200:
         return t("usage_err_http", status), False
     try:

@@ -1,18 +1,26 @@
-"""Cursor.app's independent sqlite session and quit/restore/relaunch sequence."""
+"""Cursor.app's sqlite-stored session and the quit/restore/relaunch sequence."""
 import base64
 import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import time
 from contextlib import closing
 
-from .cli_session import command
 from .i18n import t
 from .store import Error, label, metadata, private_dir, read_json, write_json
 
 BYOK_KEYS = tuple("cursorAuth/" + name for name in (
     "openAIKey", "claudeKey", "googleKey", "azureApiKey", "bedrockAccessKey", "bedrockSecretKey"))
+
+
+def command(args, quiet=False, check=False):
+    result = subprocess.run(args, stdout=subprocess.DEVNULL if quiet else None,
+                            stderr=subprocess.DEVNULL if quiet else None)
+    if check and result.returncode:
+        raise Error(f"{args[0]} exited with status {result.returncode}")
+    return result.returncode
 
 
 def db_path():
@@ -49,32 +57,50 @@ def live_token():
     return row_value(live_rows(), "accessToken")
 
 
+def snapshot_rows(directory):
+    path = directory / "ide-auth.json"
+    try:
+        return read_json(path) if path.is_file() else []
+    except (OSError, ValueError):
+        return []
+
+
+def snapshot_sub(directory):
+    return jwt_sub(row_value(snapshot_rows(directory), "accessToken"))
+
+
+def profile_for_sub(store, sub):
+    """The saved profile holding the same Cursor account (JWT sub) - survives token
+    rotation and a lagging/missing cachedEmail, unlike matching by email."""
+    if not sub:
+        return None
+    return next((d for d in store.profiles() if snapshot_sub(d) == sub), None)
+
+
+def active_profile(store):
+    return profile_for_sub(store, jwt_sub(live_token()))
+
+
 def email_for_rows(store, rows):
     email = row_value(rows, "cachedEmail")
     if email:
         return email
-    sub = jwt_sub(row_value(rows, "accessToken"))
-    if sub:
-        for directory in store.profiles():
-            try:
-                auth = read_json(directory / "cli-config.json").get("authInfo", {})
-                if auth.get("authId") == sub:
-                    return auth.get("email") or ""
-            except (OSError, ValueError, AttributeError):
-                continue
-    return ""
+    # cachedEmail can lag behind a fresh login - fall back to a saved profile
+    # of the same account.
+    directory = profile_for_sub(store, jwt_sub(row_value(rows, "accessToken")))
+    return read_json(directory / "meta.json").get("email", "") if directory else ""
 
 
 def current_email(store):
     return email_for_rows(store, live_rows())
 
 
-def capture(store, name, alias=""):
+def capture(store, name, alias, confirm):
     store.ensure()
     if not db_path().is_file():
         raise Error(t("err_ide_db_not_found", db_path()))
     rows = live_rows()
-    if not rows:
+    if not row_value(rows, "accessToken"):
         raise Error(t("err_no_ide_rows"))
     email = email_for_rows(store, rows)
     if not email:
@@ -82,36 +108,32 @@ def capture(store, name, alias=""):
     directory = store.named(name)
     if directory.is_dir():
         meta = read_json(directory / "meta.json")
-        slot = meta["slot"]
-        # Existing profiles keep all metadata, including alias and saved_at.
-        meta["ide_email"] = email
+        old = meta.get("ide_email") or meta.get("email")
+        if old != email:
+            confirm(t("confirm_overwrite", name, old or "?"))
+        meta.update(email=email, ide_email=email, type="ide-only")
+        alias = alias or meta.get("alias")
+        meta["alias"] = alias or None
     else:
-        slot = store.next_slot()
-        meta = metadata(email, slot, alias, "ide-only")
+        meta = metadata(email, store.next_slot(), alias, "ide-only")
         meta["ide_email"] = email
     private_dir(directory)
     write_json(directory / "ide-auth.json", rows)
     write_json(directory / "meta.json", meta)
-    print(t("msg_saved_ide", name, email, slot))
+    print(t("msg_saved_ide", name, email, meta["slot"]))
 
 
 def save_back(store):
     rows = live_rows()
-    sub = jwt_sub(row_value(rows, "accessToken"))
-    if not sub:
-        return
-    for directory in store.profiles():
-        path = directory / "ide-auth.json"
-        if path.is_file() and jwt_sub(row_value(read_json(path), "accessToken")) == sub:
-            write_json(path, rows)
-            return
+    directory = profile_for_sub(store, jwt_sub(row_value(rows, "accessToken")))
+    if directory:
+        write_json(directory / "ide-auth.json", rows)
 
 
 def restore(directory):
-    snapshot = directory / "ide-auth.json"
-    if not snapshot.is_file():
+    if not (directory / "ide-auth.json").is_file():
         raise Error(t("err_no_ide_captured", label(directory)))
-    replace_auth_rows(read_json(snapshot))
+    replace_auth_rows(read_json(directory / "ide-auth.json"))
 
 
 def replace_auth_rows(rows):
@@ -163,6 +185,8 @@ def relaunch(was_running):
 def switch(store, directory, confirm):
     if not db_path().is_file():
         raise Error(t("err_ide_db_not_found", db_path()))
+    if not (directory / "ide-auth.json").is_file():
+        raise Error(t("err_no_ide_captured_ref", label(directory), directory.name))
     was_running = quit_app(confirm)
     save_back(store)
     restore(directory)
@@ -180,11 +204,7 @@ def logout_local(store, confirm):
     if not row_value(rows, "accessToken"):
         print(t("msg_ide_already_logged_out"))
         return
-    sub = jwt_sub(row_value(rows, "accessToken"))
-    saved = sub and any(
-        (d / "ide-auth.json").is_file() and jwt_sub(row_value(read_json(d / "ide-auth.json"), "accessToken")) == sub
-        for d in store.profiles())
-    if not saved:
+    if not profile_for_sub(store, jwt_sub(row_value(rows, "accessToken"))):
         confirm(t("confirm_ide_logout_unsaved", email_for_rows(store, rows) or "?"))
     was_running = quit_app(confirm)
     save_back(store)

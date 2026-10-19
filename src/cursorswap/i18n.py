@@ -306,3 +306,39 @@ MSG_VI.update({
     "msg_ide_logged_out_local": "Đã đăng xuất IDE ở local (session không bị huỷ). Login account khác trong Cursor.app, rồi chạy: cursorswap ide-add <tên>",
     "help_not_implemented_python": "auto (tự switch theo quota) - API usage không document; dùng\n    'cursorswap watch'/'usage' rồi tự switch tay.\n  tui (giao diện full-screen) / menubar (app macOS riêng) - nay khả thi\n    với package Python, nhưng chưa triển khai.",
 })
+
+# IDE-only edition (CLI/API-key features archived on the archive/cli-support branch).
+MSG_EN.update({
+    "hdr_title_ide": "cursorswap - multi-account switcher for the Cursor IDE (Cursor.app)",
+    "desc_add_ide": "save the account Cursor.app is logged into as <name>\n                                       (re-run to refresh a profile's saved session)",
+    "desc_switch_rotate_ide": "rotate Cursor.app to the next enabled account",
+    "desc_switch_ref_ide": "switch Cursor.app to that account. quits + relaunches\n                                       the app (confirms first - closes ALL IDE windows)",
+    "desc_ide_logout_local": "sign the IDE out on THIS machine only (session stays\n                                       valid server-side, so its snapshot keeps working).\n                                       use this - not the IDE's own Log out, which revokes\n                                       it - before logging in another account + add",
+    "confirm_ide_logout_unsaved": "The current IDE session ({1}) isn't saved in any profile - logging out locally loses it (run 'cursorswap add <name>' first to keep it). Continue?",
+    "msg_ide_logged_out_local": "Signed the IDE out locally (session not revoked). Log in to another account in Cursor.app, then run: cursorswap add <name>",
+    "help_ide_flow": "Add a 2nd account: 'cursorswap add a' -> 'cursorswap logout-local' -> log in to the\nother account in Cursor.app -> 'cursorswap add b'. Never use the IDE's own Log out\nto change accounts: it revokes that session on Cursor's server. Sessions live as\nplaintext rows in Cursor.app's local sqlite db - undocumented, may change.",
+    "help_not_implemented_ide": "cursor-agent CLI / API-key accounts - archived (branch archive/cli-support),\n    to be revisited later.\n  auto (quota-based auto-switch), tui, menubar - not implemented.",
+    "tag_no_ide": "[no IDE session - CLI/API-key profiles are archived]",
+    "err_no_accounts_ide": "no IDE accounts saved (see: cursorswap add)",
+    "err_no_active_ide": "Cursor.app IDE isn't logged in (see: cursorswap switch)",
+    "err_archived_command": "'{1}' was a cursor-agent CLI feature - CLI support is archived for now (branch archive/cli-support); this version handles the Cursor IDE only",
+    "msg_none_saved_ide": "(none - log into Cursor.app, then: cursorswap add <name>)",
+    "usage_err_rejected_ide": "(session rejected - log in to that account again in Cursor.app, then re-run add)",
+})
+MSG_VI.update({
+    "hdr_title_ide": "cursorswap - tool đổi qua lại nhiều account cho Cursor IDE (Cursor.app)",
+    "desc_add_ide": "lưu account Cursor.app đang login thành <tên>\n                                       (chạy lại để làm mới session đã lưu của profile)",
+    "desc_switch_rotate_ide": "xoay Cursor.app sang account kế tiếp còn enable",
+    "desc_switch_ref_ide": "đổi Cursor.app sang account đó. tắt app + mở lại\n                                       (hỏi xác nhận trước - đóng HẾT mọi window IDE)",
+    "desc_ide_logout_local": "đăng xuất IDE CHỈ trên máy này (session vẫn còn hiệu lực\n                                       trên server, nên snapshot của nó vẫn dùng được).\n                                       dùng lệnh này - không dùng Log out của IDE, vì nó\n                                       huỷ session - trước khi login account khác + add",
+    "confirm_ide_logout_unsaved": "Session IDE hiện tại ({1}) chưa được lưu vào profile nào - đăng xuất local sẽ mất nó (chạy 'cursorswap add <tên>' trước để giữ lại). Tiếp tục?",
+    "msg_ide_logged_out_local": "Đã đăng xuất IDE ở local (session không bị huỷ). Login account khác trong Cursor.app, rồi chạy: cursorswap add <tên>",
+    "help_ide_flow": "Thêm account thứ 2: 'cursorswap add a' -> 'cursorswap logout-local' -> login account\nkia trong Cursor.app -> 'cursorswap add b'. Đừng dùng Log out của IDE để đổi account:\nnó huỷ session đó trên server của Cursor. Session nằm dạng plaintext trong sqlite db\nlocal của Cursor.app - không document, có thể đổi.",
+    "help_not_implemented_ide": "account cursor-agent CLI / API-key - đã archive (branch archive/cli-support),\n    sẽ làm lại sau.\n  auto (tự switch theo quota), tui, menubar - chưa làm.",
+    "tag_no_ide": "[không có session IDE - profile CLI/API-key đã archive]",
+    "err_no_accounts_ide": "chưa lưu account IDE nào (xem: cursorswap add)",
+    "err_no_active_ide": "IDE Cursor.app chưa login (xem: cursorswap switch)",
+    "err_archived_command": "'{1}' là tính năng của cursor-agent CLI - phần CLI tạm archive (branch archive/cli-support); bản này chỉ hỗ trợ Cursor IDE",
+    "msg_none_saved_ide": "(chưa có gì - login Cursor.app, rồi: cursorswap add <tên>)",
+    "usage_err_rejected_ide": "(session bị từ chối - login lại account đó trong Cursor.app rồi chạy lại add)",
+})

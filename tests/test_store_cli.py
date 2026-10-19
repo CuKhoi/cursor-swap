@@ -1,20 +1,21 @@
 import io
 import os
-from pathlib import Path
 import re
 import tarfile
 
 import pytest
 
-from cursorswap import __version__, cli, cli_session, colors, i18n
+from cursorswap import __version__, cli, colors
 from cursorswap.store import Error, Store, atomic_write, metadata, private_dir, read_json, write_json
+
+from helpers import add
 
 
 def invoke(*args):
     return cli.main(list(args))
 
 
-def profile(name, slot, alias=None, email=None, kind="api-key", enabled=True):
+def profile(name, slot, alias=None, email=None, kind="ide-only", enabled=True):
     store = Store()
     store.ensure()
     directory = store.named(name)
@@ -35,12 +36,10 @@ def test_resolution_and_renumber():
     with pytest.raises(Error, match="no account matches"):
         store.require("missing")
     assert store.next_slot() == 10
-    write_json(store.map_file, {"/project": "b"})
     assert invoke("renumber") == 0
     assert read_json(a / "meta.json")["slot"] == 1
     assert read_json(b / "meta.json")["slot"] == 2
     assert read_json(b / "meta.json")["alias"] == "second"
-    assert read_json(store.map_file) == {"/project": "b"}
     assert store.next_slot() == 3
     # Preserve Bash's alphabetical traversal when references collide.
     meta = read_json(a / "meta.json")
@@ -50,78 +49,65 @@ def test_resolution_and_renumber():
 
 
 def test_smoke_round_trip(tmp_path, capsys):
-    assert invoke("add-token", "sk-test", "--email", "ci@example.com", "--alias", "ci") == 0
+    add("ci", "ci@example.com", "--alias", "ci")
     store = Store()
     directory = store.require("ci")
-    assert (directory / "api-key").read_text() == "sk-test"
     assert invoke("ls") == 0
     assert "ci@example.com" in capsys.readouterr().out
-    assert invoke("usage", "ci") == 1
-    assert "api-key" in capsys.readouterr().err
     for command, expected in (("disable", False), ("enable", True)):
         assert invoke(command, "ci") == 0
         assert read_json(directory / "meta.json")["enabled"] is expected
     assert invoke("alias", "ci", "short") == 0
     assert invoke("alias") == 0
     assert "short" in capsys.readouterr().out
-    assert invoke("map", "short", str(tmp_path)) == 0
-    assert invoke("map") == 0
-    assert "ci@example.com" in capsys.readouterr().out
-    child = tmp_path / "nested"
-    child.mkdir()
-    os.chdir(child)
-    assert store.mapped_profile() == directory.name
-    assert invoke("unmap", str(tmp_path)) == 0
-    assert store.mapped_profile() == ""
     assert invoke("alias", "short", "--unset") == 0
     assert read_json(directory / "meta.json")["alias"] is None
-    assert invoke("alias", "1", "ci") == 0
     assert invoke("renumber") == 0
-    assert invoke("map", "ci", str(tmp_path)) == 0
     backup = tmp_path / "backup.tar.gz"
     assert invoke("export", str(backup)) == 0
     assert backup.stat().st_mode & 0o777 == 0o600
-    with tarfile.open(backup) as archive:
-        assert "./mappings.json" in archive.getnames()
     assert invoke("rm", "ci") == 0
     assert invoke("import", str(backup)) == 0
     assert invoke("list") == 0
     assert "ci@example.com" in capsys.readouterr().out
-    atomic_write(directory / "api-key", "changed")
+    atomic_write(directory / "ide-auth.json", "[]")
     assert invoke("import", str(backup)) == 0
-    assert "skip 'ci@example.com'" in capsys.readouterr().out
-    assert (directory / "api-key").read_text() == "changed"
+    assert "skip 'ci'" in capsys.readouterr().out
+    assert read_json(directory / "ide-auth.json") == []
     assert invoke("--force", "import", str(backup)) == 0
-    assert (directory / "api-key").read_text() == "sk-test"
+    assert read_json(directory / "ide-auth.json") != []
     for path in store.path.rglob("*"):
         assert path.stat().st_mode & 0o777 == (0o700 if path.is_dir() else 0o600)
     assert store.path.stat().st_mode & 0o777 == 0o700
     assert invoke("remove", "ci") == 0
     assert invoke("purge") == 0
     assert not store.path.exists()
-    assert invoke("import", str(backup)) == 0
-    assert read_json(store.map_file) == {}  # Bash intentionally ignores imported mappings.
 
 
-def test_stdin_default_email_and_overwrite(monkeypatch):
-    monkeypatch.setattr("sys.stdin", io.StringIO("sk-from-stdin\n\n"))
-    assert invoke("add-token", "-", "--alias", "one") == 0
-    directory = Store().require("one")
-    assert directory.name == "api-key-1@token.local"
-    assert (directory / "api-key").read_text() == "sk-from-stdin"
-    assert invoke("add-token", "new", "--email", directory.name) == 0
-    assert read_json(directory / "meta.json")["alias"] == "one"
-    assert read_json(directory / "meta.json")["slot"] == 1
+def test_legacy_cli_profiles_are_listed_not_switchable(capsys):
+    profile("old", 1, kind="session")
+    assert invoke("list") == 0
+    assert "CLI/API-key profiles are archived" in capsys.readouterr().out
+    assert invoke("usage", "old") == 1
+    assert invoke("switch") == 1
+
+
+@pytest.mark.parametrize("command", ["login", "add-token", "run", "map", "unmap", "status", "current"])
+def test_archived_commands(command, capsys):
+    assert invoke(command) == 1
+    assert "archive/cli-support" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("command", ["help", "--help", "-h", ""])
 def test_help(command, capsys):
     assert invoke(command) == 0
     output = capsys.readouterr().out
-    assert "cursorswap ide-switch" in output
+    assert "Cursor IDE" in output
+    assert "cursorswap logout-local" in output
     assert "uv tool upgrade cursorswap" in output
-    assert "now feasible" in output
+    assert "archive/cli-support" in output
     assert "{t:" not in output
+    assert "add-token" not in output
 
 
 @pytest.mark.parametrize("command", ["version", "--version", "-v"])
@@ -130,9 +116,8 @@ def test_version(command, capsys):
     assert capsys.readouterr().out == f"cursorswap {__version__}\n"
 
 
-@pytest.mark.parametrize("args", [["unknown"], ["add"], ["login"], ["ide-add"], ["ide-switch"],
-    ["use"], ["remove"], ["disable"], ["export"], ["import"], ["add", "--alias"],
-    ["add-token", "key", "--email"], ["add-token", "key", "--email", "../escape"], ["run"]])
+@pytest.mark.parametrize("args", [["unknown"], ["add"], ["ide-add"], ["switch", "missing"], ["usage", "missing"],
+    ["remove"], ["disable"], ["export"], ["import"], ["add", "--alias"], ["add", "../escape"]])
 def test_errors(args, capsys):
     assert cli.main(args) == 1
     assert capsys.readouterr().err.startswith("error: ")
@@ -229,7 +214,7 @@ def test_import_rejects_unsafe_archive(tmp_path, name, kind, capsys):
 
 
 def test_export_inside_store(tmp_path):
-    assert invoke("add-token", "key") == 0
+    add("a", "a@example.com")
     path = Store().path / "backup.tar.gz"
     assert invoke("export", str(path)) == 0
     with tarfile.open(path) as archive:

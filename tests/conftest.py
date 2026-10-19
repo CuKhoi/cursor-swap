@@ -1,6 +1,7 @@
 """Every test is isolated from the user's credentials, app, home, and network."""
 import io
 import subprocess
+from urllib.error import URLError
 
 import pytest
 
@@ -21,40 +22,25 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(i18n, "LANG", "en")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
-    state = {"calls": [], "secrets": {}, "agent_status": 0, "running": False}
+    state = {"calls": [], "running": False}
 
     def run(args, **kwargs):
         state["calls"].append(list(args))
-        assert args[0] in ("security", "pgrep", "osascript", "open", "agent", "clear", "uv"), args
-        status, output = 0, ""
-        if args[0] == "security":
-            service = args[args.index("-s") + 1]
-            if args[1] == "find-generic-password":
-                status = 0 if service in state["secrets"] else 1
-                output = state["secrets"].get(service, "") + "\n"
-            else:
-                assert args[1] == "add-generic-password"
-                state["secrets"][service] = args[args.index("-w") + 1]
-        elif args[0] == "pgrep":
+        assert args[0] in ("pgrep", "osascript", "open", "clear", "uv"), args
+        status = 0
+        if args[0] == "pgrep":
             assert args == ["pgrep", "-x", "Cursor"]
             status = 0 if state["running"] else 1
         elif args[0] == "osascript":
             assert args == ["osascript", "-e", 'quit app "Cursor"']
             if not state.get("stuck"):
                 state["running"] = False
-        elif args[0] == "agent":
-            status = state["agent_status"]
-        return subprocess.CompletedProcess(args, status, output, "")
+        return subprocess.CompletedProcess(args, status, "", "")
 
-    def execvp(file, args):
-        assert file == "agent"
-        state["calls"].append(list(args))
-        raise SystemExit(state["agent_status"])
-
-    def no_network(*args, **kwargs):
-        raise AssertionError("Network must be mocked explicitly")
+    def offline(*args, **kwargs):
+        # Never reach Cursor's API; tests that need a response mock urlopen themselves.
+        raise URLError("network disabled in tests")
 
     monkeypatch.setattr(subprocess, "run", run)
-    monkeypatch.setattr("os.execvp", execvp)
-    monkeypatch.setattr(usage.request, "urlopen", no_network)
+    monkeypatch.setattr(usage.request, "urlopen", offline)
     return state

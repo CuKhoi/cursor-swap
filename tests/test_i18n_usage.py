@@ -59,7 +59,7 @@ def test_usage_request_and_rounding(monkeypatch):
     assert usage.summary("fake-token") == ("total: 70.2%  auto: 90%  api: 0%", True)
 
 
-@pytest.mark.parametrize("status,key", [(401, "usage_err_revoked"), (403, "usage_err_revoked"),
+@pytest.mark.parametrize("status,key", [(401, "usage_err_rejected_ide"), (403, "usage_err_rejected_ide"),
                                          (429, "usage_err_http"), (500, "usage_err_http"), (302, "usage_err_http")])
 def test_usage_http_errors(monkeypatch, status, key):
     def fail(*args, **kwargs):
@@ -97,11 +97,13 @@ def test_usage_no_token():
     assert cli.main(["usage"]) == 1
 
 
-def test_usage_active_cli_and_ide_failure(isolated, monkeypatch, capsys):
-    isolated["secrets"]["cursor-access-token"] = "fake-token"
+def test_usage_active_ide_and_failure(isolated, monkeypatch, capsys):
+    from helpers import add
+    add("a", "a@example.com")
     monkeypatch.setattr(usage.request, "urlopen", lambda *a, **kw: Response(b'{"planUsage":{"totalPercentUsed":5}}'))
     assert cli.main(["usage"]) == 0
-    assert "(cli active): total: 5%" in capsys.readouterr().out
+    assert "(ide active): total: 5%" in capsys.readouterr().out
+    assert cli.main(["usage", "a"]) == 0
     monkeypatch.setattr(usage.request, "urlopen", lambda *a, **kw: Response(b"", 403))
     assert cli.main(["usage"]) == 1
     assert "session rejected" in capsys.readouterr().err

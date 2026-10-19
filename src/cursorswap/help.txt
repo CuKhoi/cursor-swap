@@ -1,29 +1,15 @@
-{bold}{t:hdr_title}{reset}
+{bold}{t:hdr_title_ide}{reset}
 
 {bold}{t:hdr_commands}{reset}
   cursorswap list                    {t:desc_list}
-  cursorswap status                  {t:desc_status}
   cursorswap usage [slot|name|...]   {t:desc_usage}
-  cursorswap switch                  {t:desc_switch_rotate}
-  cursorswap switch <slot|name|...>  {t:desc_switch_ref}
-  cursorswap add <name> [--alias A]  {t:desc_add}
-  cursorswap login <name>            {t:desc_login}
-  cursorswap add-token <key|-> [--email E] [--alias A]
-                                       {t:desc_add_token}
-  cursorswap ide-add <name> [--alias A]
-                                       {t:desc_ide_add}
-  cursorswap ide-switch <slot|name|...>
-                                       {t:desc_ide_switch}
-  cursorswap ide-logout-local        {t:desc_ide_logout_local}
+  cursorswap add <name> [--alias A]  {t:desc_add_ide}
+  cursorswap switch                  {t:desc_switch_rotate_ide}
+  cursorswap switch <slot|name|...>  {t:desc_switch_ref_ide}
+  cursorswap logout-local            {t:desc_ide_logout_local}
   cursorswap remove <slot|name|...>  {t:desc_remove}
   cursorswap disable <slot|name|...> {t:desc_disable}
   cursorswap enable <slot|name|...>  {t:desc_enable}
-  cursorswap run <slot|name> [-- args...]
-                                       {t:desc_run}
-  cursorswap run [-- args...]        {t:desc_run_mapped}
-  cursorswap map <slot|name> [path]  {t:desc_map}
-  cursorswap map                     {t:desc_map_list}
-  cursorswap unmap [path]            {t:desc_unmap}
   cursorswap alias <slot|name> <short>
   cursorswap alias <slot|name> --unset
   cursorswap alias                   {t:desc_alias_list}
@@ -43,9 +29,9 @@
 
 {muted}{t:help_usage_pct}{reset}
 
-{muted}{t:help_ide_account}{reset}
+{muted}{t:help_ide_flow}{reset}
 
 {bold}{t:hdr_not_implemented}{reset}
-  {t:help_not_implemented_python}
+  {t:help_not_implemented_ide}
 
 {muted}{t:help_data:store}{reset}

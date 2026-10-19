@@ -98,12 +98,3 @@ class Store:
             write_json(directory / "meta.json", meta)
         return len(directories)
 
-    def mapped_profile(self):
-        self.ensure()
-        mappings = read_json(self.map_file)
-        directory = Path.cwd()
-        while directory != directory.parent:
-            if mappings.get(str(directory)):
-                return mappings[str(directory)]
-            directory = directory.parent
-        return ""
