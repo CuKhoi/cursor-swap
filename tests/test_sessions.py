@@ -208,3 +208,29 @@ def test_switch_never_prompts_and_readd_refreshes_saved_at(isolated, monkeypatch
     assert ["open", "-a", "Cursor"] in isolated["calls"]
     assert cli.main(["add", "a"]) == 0
     assert read_json(directory / "meta.json")["saved_at"] != "2000-01-01T00:00:00Z"
+
+
+def test_switch_and_logout_leave_chats_and_workspace_state_alone(isolated):
+    """Only ItemTable cursorAuth/* rows change - chat history (cursorDiskKV,
+    composerHeaders) and every other app/workspace key are untouched."""
+    import sqlite3
+    add("a", "a@example.com")
+    add("b", "b@example.com")
+    with sqlite3.connect(ide.db_path()) as conn:
+        conn.execute("CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)")
+        conn.execute("CREATE TABLE composerHeaders (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)")
+        conn.executemany("INSERT INTO cursorDiskKV VALUES (?, ?)",
+                         [("composerData:1", "{chat}"), ("bubbleId:1:2", "{msg}"), ("agentKv:x", "y")])
+        conn.execute("INSERT INTO composerHeaders VALUES ('h', 'header')")
+        conn.execute("INSERT INTO ItemTable VALUES ('memento/workbench.parts.editor', 'open-tabs')")
+
+    def snapshot():
+        with sqlite3.connect(ide.db_path()) as conn:
+            return (list(conn.execute("SELECT * FROM cursorDiskKV ORDER BY key")),
+                    list(conn.execute("SELECT * FROM composerHeaders")),
+                    list(conn.execute("SELECT * FROM ItemTable WHERE key NOT LIKE 'cursorAuth/%' ORDER BY key")))
+
+    before = snapshot()
+    assert cli.main(["switch", "a"]) == 0
+    assert cli.main(["logout-local"]) == 0
+    assert snapshot() == before
