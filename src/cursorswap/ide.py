@@ -101,7 +101,7 @@ def capture(store, name, alias, confirm):
         raise Error(t("err_ide_db_not_found", db_path()))
     rows = live_rows()
     if not row_value(rows, "accessToken"):
-        raise Error(t("err_no_ide_rows"))
+        raise Error(t("err_ide_not_logged_in"))
     email = email_for_rows(store, rows)
     if not email:
         raise Error(t("err_no_cached_email"))
