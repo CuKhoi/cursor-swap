@@ -234,3 +234,37 @@ def test_switch_and_logout_leave_chats_and_workspace_state_alone(isolated):
     assert cli.main(["switch", "a"]) == 0
     assert cli.main(["logout-local"]) == 0
     assert snapshot() == before
+
+
+def test_switch_on_windows_uses_tasklist_taskkill_and_start(isolated, monkeypatch, tmp_path):
+    monkeypatch.setattr(ide, "WINDOWS", True)
+    exe = tmp_path / "local/Programs/cursor/Cursor.exe"
+    exe.parent.mkdir(parents=True)
+    exe.touch()
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    add("a", "a@example.com")
+    add("b", "b@example.com")
+    isolated["running"] = True
+    assert cli.main(["switch", "a"]) == 0
+    assert ide_rows()["cursorAuth/accessToken"] == jwt("auth0|a")
+    assert ["taskkill", "/IM", "Cursor.exe"] in isolated["calls"]
+    assert ["cmd", "/c", "start", "", str(exe)] in isolated["calls"]
+    assert not any(call[0] in ("pgrep", "osascript", "open") for call in isolated["calls"])
+
+
+def test_windows_quit_timeout_writes_nothing(isolated, monkeypatch):
+    monkeypatch.setattr(ide, "WINDOWS", True)
+    monkeypatch.setattr(ide.time, "sleep", lambda _: None)
+    add("a", "a@example.com")
+    add("b", "b@example.com")
+    isolated.update(running=True, stuck=True)
+    assert cli.main(["switch", "a"]) == 1
+    assert ide_rows()["cursorAuth/accessToken"] == jwt("auth0|b")
+    assert not any(call[0] == "cmd" for call in isolated["calls"])
+
+
+def test_windows_db_path_uses_appdata(monkeypatch, tmp_path):
+    monkeypatch.setattr(ide, "WINDOWS", True)
+    monkeypatch.delenv("CURSOR_SWAP_IDE_DB")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
+    assert ide.db_path() == tmp_path / "roaming/Cursor/User/globalStorage/state.vscdb"

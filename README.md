@@ -3,12 +3,19 @@
 English | [Tiếng Việt](README.vi.md)
 
 Switch the **Cursor IDE** (Cursor.app) between several accounts without logging in again.
-macOS only.
+macOS and Windows (Windows support is new and not yet tested on a real machine -
+please report problems).
 
 ## Install / update
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/CuKhoi/cursor-swap/main/install.sh | bash
+```
+
+Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/CuKhoi/cursor-swap/main/install.ps1 | iex"
 ```
 
 Run the same command to update. cursorswap also tells you when a new version is out.
@@ -65,6 +72,8 @@ Only the login changes. These stay as they were:
 ## Good to know
 
 - Accounts are saved in `~/.cursor-accounts` (only your user can read them).
+- Windows: keep a single Cursor window open when switching. With several windows, only
+  the last one may come back after the switch.
 - Cursor doesn't document how it stores logins, so a Cursor update could break this tool.
 - Support for the `cursor-agent` CLI is paused; the old code is on the
   [`archive/cli-support`](https://github.com/CuKhoi/cursor-swap/tree/archive/cli-support) branch.

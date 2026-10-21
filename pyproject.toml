@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "cursorswap"
 dynamic = ["version"]
-description = "Multi-account switcher for Cursor CLI and Cursor.app on macOS"
+description = "Multi-account switcher for the Cursor IDE on macOS and Windows"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"

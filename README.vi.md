@@ -3,12 +3,19 @@
 [English](README.md) | Tiếng Việt
 
 Đổi **Cursor IDE** (Cursor.app) qua lại giữa nhiều account mà không phải login lại.
-Chỉ chạy trên macOS.
+Chạy trên macOS và Windows (bản Windows mới làm, chưa test trên máy thật - gặp lỗi
+thì báo lại).
 
 ## Cài / cập nhật
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/CuKhoi/cursor-swap/main/install.sh | bash
+```
+
+Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/CuKhoi/cursor-swap/main/install.ps1 | iex"
 ```
 
 Chạy lại đúng lệnh này để cập nhật. cursorswap cũng tự báo khi có bản mới.
@@ -65,6 +72,8 @@ Chỉ có login thay đổi. Những thứ sau giữ nguyên:
 ## Cần biết
 
 - Account được lưu ở `~/.cursor-accounts` (chỉ user của bạn đọc được).
+- Windows: nên để Cursor mở 1 cửa sổ khi switch. Mở nhiều cửa sổ thì sau khi switch có
+  thể chỉ cửa sổ cuối được mở lại.
 - Cursor không công bố cách lưu login, nên 1 bản cập nhật Cursor có thể làm tool này hỏng.
 - Hỗ trợ `cursor-agent` CLI đang tạm dừng; code cũ nằm ở branch
   [`archive/cli-support`](https://github.com/CuKhoi/cursor-swap/tree/archive/cli-support).

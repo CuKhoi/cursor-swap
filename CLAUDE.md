@@ -5,7 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `cursorswap` — a multi-account switcher for the **Cursor IDE** (Cursor.app) on macOS: it
-snapshots Cursor.app's login into named profiles and restores them. A Python 3.12+ package
+snapshots Cursor.app's login into named profiles and restores them. Windows is supported
+(`ide.WINDOWS`: `%APPDATA%` db, `tasklist`/`taskkill` without `/F`/`cmd /c start Cursor.exe`)
+but untested on a real machine - `install.ps1` is its installer. A Python 3.12+ package
 managed with uv, zero runtime dependencies (stdlib only).
 
 **Scope is IDE-only.** `cursor-agent` CLI support (Keychain sessions, API keys,

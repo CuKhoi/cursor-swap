@@ -331,6 +331,7 @@ MSG_EN.update({
     "desc_update_ide": "update to the latest version from GitHub",
     "msg_none_saved_ide": "(none - log into Cursor.app, then: cursorswap add <name>)",
     "usage_err_rejected_ide": "(session rejected - log in to that account again in Cursor.app, then re-run add)",
+    "err_ide_exe_not_found": "{1} not found - is Cursor installed? Open Cursor yourself; the account is already switched",
 })
 MSG_VI.update({
     "hdr_title_ide": "cursorswap - tool đổi qua lại nhiều account cho Cursor IDE (Cursor.app)",
@@ -355,4 +356,5 @@ MSG_VI.update({
     "desc_update_ide": "cập nhật lên bản mới nhất từ GitHub",
     "msg_none_saved_ide": "(chưa có gì - login Cursor.app, rồi: cursorswap add <tên>)",
     "usage_err_rejected_ide": "(session bị từ chối - login lại account đó trong Cursor.app rồi chạy lại add)",
+    "err_ide_exe_not_found": "không thấy {1} - Cursor đã cài chưa? Tự mở Cursor lên; account đã được đổi rồi",
 })

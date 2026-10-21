@@ -5,11 +5,16 @@ import os
 from pathlib import Path
 import sqlite3
 import subprocess
+import sys
 import time
 from contextlib import closing
 
 from .i18n import t
 from .store import Error, label, metadata, private_dir, read_json, write_json
+
+# ponytail: Windows support written without a Windows machine to test on - paths
+# and taskkill behaviour follow Cursor's/VS Code's documented defaults.
+WINDOWS = sys.platform == "win32"
 
 BYOK_KEYS = tuple("cursorAuth/" + name for name in (
     "openAIKey", "claudeKey", "googleKey", "azureApiKey", "bedrockAccessKey", "bedrockSecretKey"))
@@ -24,8 +29,21 @@ def command(args, quiet=False, check=False):
 
 
 def db_path():
-    return Path(os.environ.get("CURSOR_SWAP_IDE_DB") or
-                Path.home() / "Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+    if os.environ.get("CURSOR_SWAP_IDE_DB"):
+        return Path(os.environ["CURSOR_SWAP_IDE_DB"])
+    base = (Path(os.environ.get("APPDATA") or Path.home() / "AppData/Roaming") if WINDOWS
+            else Path.home() / "Library/Application Support")
+    return base / "Cursor/User/globalStorage/state.vscdb"
+
+
+def windows_exe():
+    """Cursor's per-user installer location, then the all-users one."""
+    candidates = [Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData/Local") / "Programs/cursor/Cursor.exe",
+                  Path(os.environ.get("ProgramFiles") or "C:/Program Files") / "cursor/Cursor.exe"]
+    exe = next((path for path in candidates if path.is_file()), None)
+    if not exe:
+        raise Error(t("err_ide_exe_not_found", candidates[0]))
+    return exe
 
 
 def jwt_sub(token):
@@ -156,6 +174,11 @@ def replace_auth_rows(rows):
 
 
 def running():
+    if WINDOWS:
+        # tasklist exits 0 even when nothing matches, so check its output.
+        listing = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Cursor.exe", "/NH"],
+                                 capture_output=True, text=True).stdout or ""
+        return "cursor.exe" in listing.lower()
     return command(["pgrep", "-x", "Cursor"], quiet=True) == 0
 
 
@@ -165,7 +188,9 @@ def quit_app():
     if not running():
         return False
     print(t("msg_ide_quitting"))
-    command(["osascript", "-e", 'quit app "Cursor"'], quiet=True)
+    # No /F: taskkill asks the windows to close, like the macOS quit, so a save
+    # prompt still makes this time out before anything is written.
+    command(["taskkill", "/IM", "Cursor.exe"] if WINDOWS else ["osascript", "-e", 'quit app "Cursor"'], quiet=True)
     waited = 0
     while running() and waited < 15:
         time.sleep(1)
@@ -177,7 +202,8 @@ def quit_app():
 
 def relaunch(was_running):
     if was_running:
-        command(["open", "-a", "Cursor"], check=True)
+        # `start` returns at once; running Cursor.exe directly would wait for it to exit.
+        command(["cmd", "/c", "start", "", str(windows_exe())] if WINDOWS else ["open", "-a", "Cursor"], check=True)
         print(t("msg_relaunched"))
     else:
         print(t("msg_ide_not_running"))

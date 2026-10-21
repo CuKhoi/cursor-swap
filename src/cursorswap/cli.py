@@ -228,7 +228,7 @@ class CLI:
         interval = max(5, interval)
         try:
             while True:
-                ide.command(["clear"])
+                ide.command(["cmd", "/c", "cls"] if ide.WINDOWS else ["clear"])
                 print(colors.muted(t("msg_watch_header", interval)))
                 print()
                 self.cmd_list([])
